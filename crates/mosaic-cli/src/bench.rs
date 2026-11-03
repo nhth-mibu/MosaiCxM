@@ -132,8 +132,8 @@ fn bench_match(photos: usize, cols: u32, rows: u32, seed: u64, brute_tiles: usiz
         let t = Instant::now();
         match match_tiles(&pool, &target, &grid, &s, job) {
             Ok((_, st)) => println!(
-                "full match {label:<22}: total {:.0} ms (candidates+index {:.0}, retrieval {:.0}, assignment {:.0}); distinct {}, max uses {}, ΔE {:.1}, widened {}, full scans {}",
-                t.elapsed().as_secs_f64() * 1000.0, st.build_ms, st.retrieval_ms, st.assign_ms, st.distinct_used, st.max_uses, st.mean_delta_e, st.widened_searches, st.full_scans
+                "full match {label:<22}: total {:.0} ms (candidates+index {:.0}, retrieval {:.0}, assignment {:.0}); distinct {}, max uses {}, ΔE {:.1}, widened {}, index rebuilds {}",
+                t.elapsed().as_secs_f64() * 1000.0, st.build_ms, st.retrieval_ms, st.assign_ms, st.distinct_used, st.max_uses, st.mean_delta_e, st.widened_searches, st.index_rebuilds
             ),
             Err(e) => println!("full match {label}: {e}"),
         }

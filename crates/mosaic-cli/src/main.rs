@@ -348,7 +348,7 @@ fn run(cli: Cli, cancel: Arc<AtomicBool>) -> Result<()> {
                 load_ms, s.build_ms, s.retrieval_ms, s.assign_ms
             );
             if s.widened_searches > 0 {
-                println!("Search widened for {} tiles (reuse limits exhausted nearest candidates); full scans: {}.", s.widened_searches, s.full_scans);
+                println!("Search widened for {} tiles (reuse limits exhausted nearest candidates); available-photo index rebuilds: {}.", s.widened_searches, s.index_rebuilds);
             }
             if project.settings.color_correction > 0.0 || project.settings.motif_blend > 0.0 {
                 println!(
