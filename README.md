@@ -42,7 +42,7 @@ flowchart LR
 
 ### 1 Photos (teal)
 
-Click **+ Add folder**. The app reads the photos in that folder straight away. You can see the progress at the bottom of the window. A few thousand photos is enough; more photos give a better mosaic.
+Click **+ Add folder**. The app reads the photos in that folder, and in all folders inside it, straight away. Hidden and system folders (like the Trash or NAS thumbnail folders) are left out. You can see the progress at the bottom of the window. A few thousand photos is enough; more photos give a better mosaic.
 
 You don't need to do anything else. Each time you open the app, it checks your folders for new or deleted photos by itself.
 

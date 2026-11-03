@@ -364,3 +364,39 @@ fn orientation_and_crop_are_consistent_between_descriptor_and_render() {
     assert!(at(20, 20)[0] > 180 && at(20, 20)[2] < 80, "top tile red: {:?}", at(20, 20));
     assert!(at(20, 60)[2] > 180 && at(20, 60)[0] < 80, "bottom tile blue: {:?}", at(20, 60));
 }
+
+#[test]
+fn scan_is_recursive_and_skips_system_folders() {
+    let e = env();
+    let photos = e.root.join("photos");
+    write_photos(&photos, 0..2);
+    write_photos(&photos.join("2024/summer/beach/day1"), 2..5); // 4 levels deep
+    write_photos(&photos.join("2025"), 5..7);
+    // Not photos: NAS thumbnails, hidden folders, trash, macOS resource files.
+    write_photos(&photos.join("2025/@eaDir"), 100..103);
+    write_photos(&photos.join(".thumbnails"), 103..105);
+    write_photos(&photos.join("$RECYCLE.BIN"), 105..106);
+    photo(106).save(photos.join("2025/._p0005.jpg")).unwrap();
+    #[cfg(unix)]
+    {
+        // A loop back to the root, and a link to a folder outside the root.
+        std::os::unix::fs::symlink(&photos, photos.join("2024/loop")).unwrap();
+        let outside = e.root.join("elsewhere");
+        write_photos(&outside, 7..9);
+        std::os::unix::fs::symlink(&outside, photos.join("linked")).unwrap();
+    }
+    let lib = e.cat.create_library("nested").unwrap();
+    e.cat.add_root(lib, &photos).unwrap();
+    let rep = update_library(&e.cat, lib, &opts(), &Job::default()).unwrap();
+    let expected: u64 = if cfg!(unix) { 9 } else { 7 };
+    assert_eq!(rep.added, expected, "{rep:?}");
+    assert!(rep.walk_errors.is_empty(), "{:?}", rep.walk_errors);
+    if cfg!(unix) {
+        assert!(rep.skipped.iter().any(|(_, why)| why.contains("symlink loop")), "{:?}", rep.skipped);
+    }
+    // The same rules apply to motif folders.
+    assert_eq!(MotifCandidate::from_folder(&photos).unwrap().len() as u64, expected);
+    // A re-scan finds nothing new and removes nothing.
+    let again = update_library(&e.cat, lib, &opts(), &Job::default()).unwrap();
+    assert_eq!((again.added, again.removed), (0, 0));
+}

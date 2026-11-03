@@ -113,7 +113,9 @@ The notes explain the result in plain words, for example "strong colour coverage
 
 ## Libraries and indexing
 
-- Formats: JPEG, PNG and WebP, detected from file content. Files are only picked up by extension (`jpg jpeg jpe jfif png webp`). Other files are counted as ignored. Hidden files and folders are skipped.
+- Formats: JPEG, PNG and WebP, detected from file content. Files are only picked up by extension (`jpg jpeg jpe jfif png webp`). Other files are counted as ignored.
+- Folders are scanned at any depth. Symlinked folders are followed; a symlink loop is reported once and not scanned twice. If a folder can't be read, files already indexed under it are kept rather than marked removed.
+- Skipped: hidden files and folders (names starting with `.`, which covers macOS `._` files, `.Trashes` and `.Spotlight-V100`) and system or NAS folders (`@eaDir`, `#recycle`, `#snapshot`, `$RECYCLE.BIN`, `System Volume Information`, `lost+found`). Motif folders use the same rules.
 - **EXIF orientation** is applied before analysis, preview and export, so crops always refer to the upright image.
 - **Change detection:** path + size + mtime (ns). On a mismatch the file is re-hashed (BLAKE3). If a current descriptor already exists for that content (a moved, copied or touched file, or a duplicate), it is reused without decoding. Only new content is decoded. *Limitation:* an edit that keeps both size and mtime is missed unless you run `library update --verify`, which re-hashes everything.
 - Removed files are dropped from the index. A **missing source folder** (for example an unplugged drive) is reported, and its records are kept.
