@@ -102,7 +102,7 @@ jobs:
           app="dist/stage/MosaiCxM.app"
           mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
           cp "$bin/mosaic-gui" "$app/Contents/MacOS/"
-          cp "$bin/mosaic" README.md dist/stage/
+          cp README.md dist/stage/
 
           # App icon from the UI's PNG.
           iconset=dist/AppIcon.iconset
@@ -137,7 +137,6 @@ jobs:
 
           # Ad-hoc signature so Apple silicon will run it (not notarized).
           codesign --force --deep --sign - "$app"
-          codesign --force --sign - dist/stage/mosaic
 
           ln -s /Applications dist/stage/Applications
           hdiutil create -volname "MosaiCxM" -srcfolder dist/stage -ov -format UDZO "dist/$name.dmg"

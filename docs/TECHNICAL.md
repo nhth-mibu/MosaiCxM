@@ -27,7 +27,7 @@ The catalogue (index, descriptors, thumbnails) lives in the platform data folder
 Pushing a tag like `v0.1.0` runs `.github/workflows/release.yml` and publishes a GitHub Release with:
 
 - `mosaic-<tag>-windows-x64.zip` (`mosaic.exe`, `mosaic-gui.exe`)
-- `mosaic-<tag>-macos-arm64.dmg` (`MosaiCxM.app` plus the `mosaic` CLI)
+- `mosaic-<tag>-macos-arm64.dmg` (`MosaiCxM.app` only)
 - `mosaic-<tag>-linux-x64.tar.gz` (`mosaic`, `mosaic-gui`)
 
 ```bash
