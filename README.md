@@ -24,6 +24,20 @@ cargo test --release               # engine tests
 
 The catalogue (index, descriptors, thumbnails) lives in the platform data folder, e.g. `~/.local/share/mosaic` on Linux. Override it with `--data-dir` or `MOSAIC_DATA_DIR`.
 
+## Releases
+
+Pushing a tag like `v0.1.0` runs `.github/workflows/release.yml` and publishes a GitHub Release with:
+
+- `mosaic-<tag>-windows-x64.zip` (`mosaic.exe`, `mosaic-gui.exe`)
+- `mosaic-<tag>-macos-arm64.dmg` (`MosaiCxM.app` plus the `mosaic` CLI)
+- `mosaic-<tag>-linux-x64.tar.gz` (`mosaic`, `mosaic-gui`)
+
+```bash
+git tag v0.1.0 && git push origin v0.1.0
+```
+
+You can also run the workflow by hand from the Actions tab; it then only uploads the files as workflow artifacts. The macOS app is ad-hoc signed but not notarized, so on first launch right-click it and choose **Open**.
+
 ## CLI workflow
 
 ```bash
