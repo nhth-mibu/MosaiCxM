@@ -1,4 +1,4 @@
-import { Button, LineEdit, SpinBox, Slider, CheckBox, ComboBox, TabWidget, StandardListView, GroupBox, ProgressIndicator, ScrollView, HorizontalBox, VerticalBox, Palette, Switch } from "std-widgets.slint";
+import { Button, LineEdit, SpinBox, Slider, CheckBox, ComboBox, TabWidget, GroupBox, ProgressIndicator, ScrollView, HorizontalBox, VerticalBox, Palette, Switch } from "std-widgets.slint";
 
 export struct LibraryRow {
     name: string,
@@ -112,6 +112,7 @@ export component AppWindow inherits Window {
     callback show-skipped();
 
     callback browse-motif();
+    callback motif-entered();
     callback browse-suggest-folder();
     callback suggest();
     callback use-suggestion(int);
@@ -142,25 +143,29 @@ export component AppWindow inherits Window {
                         width: 380px;
                         SectionTitle { text: "Photo libraries"; }
                         Hint { text: "A library is a named set of folders with your source photos. Photos are only read, never changed. Tick the libraries to combine for the mosaic."; }
-                        StandardListView {
+                        ScrollView {
                             vertical-stretch: 1;
-                            model: root.libraries.length == 0 ? [{ text: "No libraries yet" }] : [];
-                        }
-                        for lib[i] in root.libraries: Rectangle {
-                            height: 54px;
-                            background: i == root.current-library ? Palette.selection-background.with-alpha(0.35) : transparent;
-                            border-radius: 6px;
-                            TouchArea { clicked => { root.select-library(i); } }
-                            HorizontalLayout {
-                                padding: 6px;
-                                spacing: 8px;
-                                CheckBox {
-                                    checked: lib.selected;
-                                    toggled => { root.toggle-library(i, self.checked); }
-                                }
-                                VerticalLayout {
-                                    Text { text: lib.name; font-weight: 600; }
-                                    Hint { text: lib.summary; }
+                            VerticalLayout {
+                                alignment: start;
+                                spacing: 4px;
+                                if root.libraries.length == 0: Hint { text: "No libraries yet. Create one below, then add folders."; }
+                                for lib[i] in root.libraries: Rectangle {
+                                    height: 54px;
+                                    background: i == root.current-library ? Palette.selection-background.with-alpha(0.35) : transparent;
+                                    border-radius: 6px;
+                                    TouchArea { clicked => { root.select-library(i); } }
+                                    HorizontalLayout {
+                                        padding: 6px;
+                                        spacing: 8px;
+                                        CheckBox {
+                                            checked: lib.selected;
+                                            toggled => { root.toggle-library(i, self.checked); }
+                                        }
+                                        VerticalLayout {
+                                            Text { text: lib.name; font-weight: 600; }
+                                            Hint { text: lib.summary; }
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -175,6 +180,7 @@ export component AppWindow inherits Window {
                         SectionTitle { text: root.current-library >= 0 ? "Folders of " + root.libraries[root.current-library].name : "Select a library"; }
                         Text { text: root.current-library >= 0 ? root.libraries[root.current-library].folders : ""; wrap: word-wrap; }
                         GroupBox {
+                            vertical-stretch: 0;
                             title: "Add or remove a source folder";
                             VerticalBox {
                                 HorizontalBox {
@@ -190,6 +196,7 @@ export component AppWindow inherits Window {
                             }
                         }
                         GroupBox {
+                            vertical-stretch: 0;
                             title: "Relink a moved folder (no re-analysis of unchanged photos)";
                             VerticalBox {
                                 LineEdit { placeholder-text: "Old folder path"; text <=> root.relink-old; }
@@ -220,7 +227,7 @@ export component AppWindow inherits Window {
                         Hint { text: "The image the mosaic should resemble. It is independent of the source photos."; }
                         HorizontalBox {
                             padding: 0;
-                            LineEdit { placeholder-text: "Motif image path"; text <=> root.motif-path; edited => { root.settings-changed(); } }
+                            LineEdit { placeholder-text: "Motif image path (press Enter)"; text <=> root.motif-path; accepted => { root.motif-entered(); } }
                             Button { text: "Browse…"; clicked => { root.browse-motif(); } }
                         }
                         Rectangle {
@@ -339,6 +346,7 @@ export component AppWindow inherits Window {
                 HorizontalBox {
                     VerticalBox {
                         width: 470px;
+                        alignment: start;
                         SectionTitle { text: "Full mosaic image"; }
                         LabeledField { label: "Format"; ComboBox { model: ["BigTIFF (tiled, any size)", "PNG (streamed)", "JPEG (≤ 65,535 px)"]; current-index <=> root.raster-format-index; } }
                         LabeledField { label: "Print resolution (DPI)"; LineEdit { text <=> root.export-dpi; } }
