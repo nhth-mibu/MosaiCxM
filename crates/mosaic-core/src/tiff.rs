@@ -96,17 +96,15 @@ impl<W: Write + Seek> TiledTiffWriter<W> {
         for c in &self.counts {
             self.w.write_all(&c.to_le_bytes())?;
         }
-        let res_pos = cnt_pos + 8 * self.counts.len() as u64;
-        // Resolution as RATIONAL with denominator 1000.
-        let num = (self.dpi * 1000.0).round() as u32;
-        for _ in 0..2 {
-            self.w.write_all(&num.to_le_bytes())?;
-            self.w.write_all(&1000u32.to_le_bytes())?;
-        }
+        let mut ifd_pos = cnt_pos + 8 * self.counts.len() as u64;
+        // In BigTIFF, values of up to 8 bytes are stored inline in the entry:
+        // RATIONAL (num, den) and the short Software string both fit.
+        let num = (self.dpi * 1000.0).round() as u64;
+        let rational = num | (1000u64 << 32);
         let soft = b"mosaic\0";
-        let soft_pos = res_pos + 16;
-        self.w.write_all(soft)?;
-        let mut ifd_pos = soft_pos + soft.len() as u64;
+        let mut soft_inline = [0u8; 8];
+        soft_inline[..soft.len()].copy_from_slice(soft);
+        let soft_val = u64::from_le_bytes(soft_inline);
         if ifd_pos % 2 == 1 {
             self.w.write_all(&[0])?;
             ifd_pos += 1;
@@ -126,11 +124,11 @@ impl<W: Write + Seek> TiledTiffWriter<W> {
             (259, SHORT, 1, comp),
             (262, SHORT, 1, 2),
             (277, SHORT, 1, 3),
-            (282, RATIONAL, 1, res_pos),
-            (283, RATIONAL, 1, res_pos + 8),
+            (282, RATIONAL, 1, rational),
+            (283, RATIONAL, 1, rational),
             (284, SHORT, 1, 1),
             (296, SHORT, 1, 2),
-            (305, ASCII, soft.len() as u64, soft_pos),
+            (305, ASCII, soft.len() as u64, soft_val),
             (322, LONG, 1, TILE as u64),
             (323, LONG, 1, TILE as u64),
             (324, LONG8, n, if n == 1 { self.offsets[0] } else { off_pos }),
@@ -140,7 +138,7 @@ impl<W: Write + Seek> TiledTiffWriter<W> {
             entries.push((317, SHORT, 1, 2));
         }
         entries.sort_by_key(|e| e.0);
-        // Inline-able values fit in 8 bytes; RATIONAL/ASCII/arrays use offsets above.
+        // Arrays longer than 8 bytes (tile offsets/counts) use the offsets above.
         self.w.write_all(&(entries.len() as u64).to_le_bytes())?;
         for (tag, ty, count, value) in entries {
             self.w.write_all(&tag.to_le_bytes())?;
