@@ -6,6 +6,7 @@
 //   2 Picture       coral
 //   3 Size & style  amber
 //   4 Export        violet
+//   5 Statistics    blue
 
 import { Button, LineEdit, SpinBox, Slider, CheckBox, ComboBox, ScrollView, Palette, Switch } from "std-widgets.slint";
 
@@ -19,6 +20,23 @@ export struct CollectionRow {
     name: string,
     summary: string,
     selected: bool,
+}
+
+export struct Bar {
+    label: string,
+    value: string,
+    frac: float,
+}
+
+export struct Chart {
+    title: string,
+    note: string,
+    bars: [Bar],
+}
+
+export struct Figure {
+    label: string,
+    value: string,
 }
 
 export struct SuggestionRow {
@@ -48,6 +66,11 @@ global Theme {
     out property <color> coral-soft: dark ? #42201d : #fde5e2;
     out property <color> amber-soft: dark ? #3d3114 : #fcf0d6;
     out property <color> violet-soft: dark ? #2a2550 : #e9e6fd;
+    out property <color> blue: dark ? #5aa9ff : #2774d9;
+    out property <color> blue-soft: dark ? #15304f : #e0eefc;
+
+    // Bar colours for the statistics charts, one per chart.
+    out property <[color]> chart-colors: [blue, teal, coral, amber, violet, blue, teal, coral];
 }
 
 component Hint inherits Text {
@@ -200,6 +223,62 @@ component StepCard inherits Rectangle {
     }
 }
 
+component FigureTile inherits Rectangle {
+    in property <string> label;
+    in property <string> value;
+    in property <color> tint: Theme.blue;
+    min-width: 150px;
+    height: 76px;
+    border-radius: 10px;
+    background: Theme.surface;
+    border-width: 1px;
+    border-color: Theme.line;
+    Rectangle { x: 0; width: 4px; height: parent.height - 24px; y: 12px; border-radius: 2px; background: root.tint; }
+    VerticalLayout {
+        padding: 12px;
+        padding-left: 16px;
+        spacing: 2px;
+        Text { text: root.value; font-size: 22px; font-weight: 700; color: Theme.fg; overflow: elide; }
+        Text { text: root.label; font-size: 12px; color: Theme.muted; overflow: elide; }
+    }
+}
+
+// Horizontal bar chart: one row per value, bar length relative to the largest.
+component BarChart inherits Rectangle {
+    in property <Chart> chart;
+    in property <color> tint: Theme.blue;
+    border-radius: 10px;
+    background: Theme.surface;
+    border-width: 1px;
+    border-color: Theme.line;
+    VerticalLayout {
+        padding: 14px;
+        spacing: 6px;
+        Text { text: root.chart.title; font-size: 14px; font-weight: 600; color: Theme.fg; }
+        if root.chart.note != "": Text { text: root.chart.note; font-size: 11px; color: Theme.muted; overflow: elide; }
+        if root.chart.bars.length == 0: Text { text: "No data"; font-size: 12px; color: Theme.muted; }
+        for b in root.chart.bars: HorizontalLayout {
+            spacing: 8px;
+            height: 22px;
+            Text { text: b.label; width: 120px; font-size: 12px; color: Theme.fg; vertical-alignment: center; overflow: elide; }
+            Rectangle {
+                horizontal-stretch: 1;
+                Rectangle { height: 14px; y: 4px; width: parent.width; border-radius: 4px; background: Theme.bg; }
+                Rectangle {
+                    x: 0;
+                    height: 14px;
+                    y: 4px;
+                    width: max(4px, parent.width * b.frac);
+                    border-radius: 4px;
+                    background: root.tint;
+                    animate width { duration: 400ms; easing: ease-out; }
+                }
+            }
+            Text { text: b.value; width: 52px; font-size: 12px; color: Theme.muted; horizontal-alignment: right; vertical-alignment: center; }
+        }
+    }
+}
+
 export component AppWindow inherits Window {
     title: "MosaiCxM";
     preferred-width: 1280px;
@@ -282,6 +361,14 @@ export component AppWindow inherits Window {
     in-out property <string> export-summary;
     in-out property <string> export-report;
 
+    // ----- 5 Statistics
+    in-out property <bool> has-stats: false;
+    in-out property <string> stats-summary;
+    in-out property <[Figure]> stat-figures;
+    in-out property <[Chart]> stat-charts-left;
+    in-out property <[Chart]> stat-charts-right;
+    in-out property <string> stats-note;
+
     // ----- job status
     in-out property <bool> busy: false;
     in-out property <string> status: "Ready";
@@ -307,6 +394,8 @@ export component AppWindow inherits Window {
 
     callback export-settings-changed();
     callback export();
+    callback show-stats();
+    callback save-stats-json();
     callback cancel();
 
     // Marks the preview as out of date and refreshes the grid summary.
@@ -629,6 +718,46 @@ export component AppWindow inherits Window {
                                 if root.export-report != "": StepHint { text: root.export-report; }
                             }
                         }
+
+                        // ---------- 5 Statistics (blue)
+                        StepCard {
+                            open: root.open-step == 5;
+                            tint: Theme.blue;
+                            soft: Theme.blue-soft;
+                            StepHeader {
+                                number: "5";
+                                title: "Statistics";
+                                summary: root.has-preview ? root.stats-summary : "After preview";
+                                done: false;
+                                tint: Theme.blue;
+                                clicked => {
+                                    root.open-step = 5;
+                                    root.show-stats();
+                                }
+                            }
+                            if root.open-step == 5: VerticalLayout {
+                                spacing: 8px;
+                                if !root.has-preview: StepHint { text: "Make a preview first. The statistics describe the photos in your mosaic."; }
+                                if root.has-preview: StepHint { text: "Which photos your mosaic uses, how often, and the camera settings they were taken with. Every export also saves them as a .stats.json file."; }
+                                HorizontalLayout {
+                                    spacing: 10px;
+                                    alignment: start;
+                                    ColorButton {
+                                        text: "Show statistics";
+                                        tint: Theme.blue;
+                                        enabled: !root.busy && root.has-preview;
+                                        clicked => { root.show-stats(); }
+                                    }
+                                    LinkButton {
+                                        text: "Save as JSON…";
+                                        tint: Theme.blue;
+                                        font-weight: 600;
+                                        vertical-alignment: center;
+                                        clicked => { root.save-stats-json(); }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -757,6 +886,48 @@ export component AppWindow inherits Window {
                                         alignment: center;
                                         ColorButton { text: "Use"; tint: Theme.coral; enabled: s.path != ""; clicked => { root.use-suggestion(i); } }
                                     }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if root.main-view == 3: VerticalLayout {
+                    spacing: 10px;
+                    HorizontalLayout {
+                        Text { text: "Statistics"; font-size: 18px; font-weight: 700; color: Theme.fg; horizontal-stretch: 1; }
+                        LinkButton { text: "Save as JSON…"; tint: Theme.blue; font-weight: 600; vertical-alignment: center; clicked => { root.save-stats-json(); } }
+                        Rectangle { width: 16px; }
+                        LinkButton { text: "Back to preview"; tint: Theme.blue; font-weight: 600; vertical-alignment: center; clicked => { root.main-view = 0; } }
+                    }
+                    if root.stats-note != "": Hint { text: root.stats-note; }
+                    stats-scroll := ScrollView {
+                        vertical-stretch: 1;
+                        VerticalLayout {
+                            width: stats-scroll.visible-width - 14px;
+                            spacing: 12px;
+                            alignment: start;
+                            HorizontalLayout {
+                                spacing: 10px;
+                                for f[i] in root.stat-figures: FigureTile {
+                                    label: f.label;
+                                    value: f.value;
+                                    tint: Theme.chart-colors[i];
+                                }
+                            }
+                            HorizontalLayout {
+                                spacing: 12px;
+                                VerticalLayout {
+                                    spacing: 12px;
+                                    alignment: start;
+                                    horizontal-stretch: 1;
+                                    for c[i] in root.stat-charts-left: BarChart { chart: c; tint: Theme.chart-colors[i * 2]; }
+                                }
+                                VerticalLayout {
+                                    spacing: 12px;
+                                    alignment: start;
+                                    horizontal-stretch: 1;
+                                    for c[i] in root.stat-charts-right: BarChart { chart: c; tint: Theme.chart-colors[i * 2 + 1]; }
                                 }
                             }
                         }

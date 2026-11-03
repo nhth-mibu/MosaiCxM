@@ -4,7 +4,7 @@ Turn your own photos into a big photo mosaic: one picture made of thousands of s
 
 Everything happens on your computer. Your photos are never uploaded and never changed.
 
-![MosaiCxM: four coloured steps on the left, the mosaic preview on the right](docs/images/app.jpg)
+![MosaiCxM: coloured steps on the left, the mosaic preview on the right](docs/images/app.jpg)
 
 ## Install
 
@@ -16,7 +16,7 @@ Download the latest version from the [Releases page](https://github.com/nhth-mib
 
 ## How to make a mosaic
 
-The app has four steps. Each step has its own colour, so you always know where you are. The preview of your mosaic stays on the right the whole time.
+The app has five steps. Each step has its own colour, so you always know where you are. The preview of your mosaic stays on the right the whole time.
 
 | Step | Colour | What you do |
 |---|---|---|
@@ -24,6 +24,7 @@ The app has four steps. Each step has its own colour, so you always know where y
 | **2 Picture** | 🔴 Coral | Click **Choose picture…** and pick the image the mosaic should look like. |
 | **3 Size & style** | 🟡 Amber | Type the size you want, pick a style, then click **Make preview**. |
 | **4 Export** | 🟣 Violet | Choose **Image file** or **Print pages (PDF)**, then click **Export**. |
+| **5 Statistics** | 🔵 Blue | See which photos your mosaic uses and the camera settings they were taken with. |
 
 ```mermaid
 flowchart LR
@@ -33,11 +34,13 @@ flowchart LR
   D --> E{Happy with it?}
   E -- "No: change size or style" --> D
   E -- Yes --> F["4 Export<br/>Image or print pages"]
+  F --> G["5 Statistics<br/>Bar charts"]
 
   style B fill:#dff4f0,stroke:#0f9d8a,color:#1d2433
   style C fill:#fde5e2,stroke:#e2493d,color:#1d2433
   style D fill:#fcf0d6,stroke:#d99400,color:#1d2433
   style F fill:#e9e6fd,stroke:#6c5ce7,color:#1d2433
+  style G fill:#e0eefc,stroke:#2774d9,color:#1d2433
 ```
 
 ### 1 Photos (teal)
@@ -78,6 +81,20 @@ Want more control? Open **Advanced** for the grid, how often each photo may be u
 Tick **Also save a list of the photos used** if you want a list of every photo in the mosaic.
 
 **Printing at home:** print the PDF at **100% / Actual size** with **Fit to page turned off**. Measure the 50 mm square on the first page before you print the rest. The pages overlap a little so you can glue them together; the first page shows how they fit.
+
+### 5 Statistics (blue)
+
+Click **Statistics** to see facts about your mosaic as bar charts:
+
+- how many tiles and different photos it has, and how often each photo is used
+- which cameras and lenses the photos were taken with
+- their aperture, shutter speed and ISO, and the years they were taken
+
+Camera settings come from the photos' own information (EXIF). Photos without it are counted but don't appear in the camera charts.
+
+Click **Save as JSON…** to save the numbers as a file. Every export also saves them automatically, next to the exported file, as `<name>.stats.json`.
+
+![Statistics: number tiles and bar charts for photo use, cameras, aperture, shutter speed, ISO and lenses](docs/images/statistics.jpg)
 
 ## Good to know
 
