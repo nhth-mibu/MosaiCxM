@@ -11,7 +11,7 @@ use mosaic_core::layout::{paper_by_name, PrintSettings, PAPERS};
 use mosaic_core::matching::{GridSpec, MatchError, MatchSettings, Method};
 use mosaic_core::pdf::{export_pdf, plan_pdf};
 use mosaic_core::pool::Pool;
-use mosaic_core::project::{check_sources, libraries_refs, load_target, write_manifest, Project};
+use mosaic_core::project::{check_sources, libraries_refs, load_target, write_manifest, write_output_stats, OutputStats, Project};
 use mosaic_core::render::{render_preview, FileSource};
 use mosaic_core::units::format_bytes;
 use mosaic_core::Catalog;
@@ -407,6 +407,8 @@ fn run(cli: Cli, cancel: Arc<AtomicBool>) -> Result<()> {
                 rep.cache_hits,
                 rep.cache_misses
             );
+            let details = serde_json::json!({ "format": format!("{:?}", plan.format), "dpi": plan.spec.dpi, "width_px": plan.spec.width_px, "height_px": plan.spec.height_px, "bytes": rep.bytes, "seconds": rep.elapsed_ms as f64 / 1000.0 });
+            print_stats(write_output_stats(&cat, &p, &a.out, "raster", details)?);
         }
         Cmd::Pdf(a) => {
             let cat = Catalog::open(&dd)?;
@@ -443,6 +445,9 @@ fn run(cli: Cli, cancel: Arc<AtomicBool>) -> Result<()> {
             let rep = export_pdf(&p, &src, Some(&overview), &plan, &a.out, &job)?;
             eprintln!();
             println!("Exported {} ({}, {} pages) in {:.1} s.", rep.path, format_bytes(rep.bytes), plan.layout.pages.len() + 1, rep.elapsed_ms as f64 / 1000.0);
+            let (sw, sh) = plan.print.sheet_mm();
+            let details = serde_json::json!({ "paper": plan.print.paper_name, "sheet_mm": [sw, sh], "landscape": plan.print.landscape, "pages": plan.layout.pages.len(), "page_grid": [plan.layout.cols, plan.layout.rows], "overlap_mm": plan.print.overlap_mm, "margins_mm": plan.print.margins_mm, "dpi": plan.print.dpi, "bytes": rep.bytes });
+            print_stats(write_output_stats(&cat, &p, &a.out, "tiled-pdf", details)?);
         }
         Cmd::Manifest { project, out } => {
             let cat = Catalog::open(&dd)?;
@@ -454,6 +459,27 @@ fn run(cli: Cli, cancel: Arc<AtomicBool>) -> Result<()> {
         Cmd::Bench(b) => bench::run(&dd, b, &job)?,
     }
     Ok(())
+}
+
+fn print_stats((path, st): (PathBuf, OutputStats)) {
+    let x = &st.exif;
+    println!(
+        "Statistics: {} tiles, {} distinct photos ({} used once, max {} uses); EXIF on {} photos, none on {}.",
+        st.tiles, st.distinct_photos_used, st.photos_used_once, st.max_uses_of_one_photo, x.photos_with_exif, x.photos_without_exif
+    );
+    let r = |name: &str, o: &Option<mosaic_core::project::Range>, f: &dyn Fn(f64) -> String| {
+        if let Some(r) = o {
+            println!("  {name}: {} – {} (median {})", f(r.min), f(r.max), f(r.median));
+        }
+    };
+    r("aperture", &x.aperture_f, &|v| format!("f/{v:.1}"));
+    r("shutter", &x.shutter_s, &|v| mosaic_core::project::shutter_label(v));
+    r("ISO", &x.iso, &|v| format!("{v:.0}"));
+    r("focal length", &x.focal_length_mm, &|v| format!("{v:.0} mm"));
+    if let Some(c) = x.cameras.first() {
+        println!("  most used camera: {} ({} photos)", c.value, c.photos);
+    }
+    println!("  saved {}", path.display());
 }
 
 pub fn overview_tile_px(p: &Project) -> u32 {
