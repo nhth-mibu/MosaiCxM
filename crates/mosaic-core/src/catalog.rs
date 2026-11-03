@@ -50,6 +50,7 @@ pub struct FileRec {
     pub mtime_ns: i64,
     pub hash: Option<Hash>,
     pub status: i64,
+    pub meta_version: i64,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -60,6 +61,24 @@ pub struct Attribution {
     pub source: Option<String>,
 }
 
+/// Camera metadata read from EXIF (all optional; many images have none).
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct PhotoExif {
+    pub camera: Option<String>,
+    pub lens: Option<String>,
+    pub f_number: Option<f64>,
+    pub exposure_s: Option<f64>,
+    pub iso: Option<i64>,
+    pub focal_mm: Option<f64>,
+    pub taken: Option<String>,
+}
+
+impl PhotoExif {
+    pub fn is_empty(&self) -> bool {
+        self.camera.is_none() && self.lens.is_none() && self.f_number.is_none() && self.exposure_s.is_none() && self.iso.is_none() && self.focal_mm.is_none() && self.taken.is_none()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Location {
     pub library: String,
@@ -67,6 +86,7 @@ pub struct Location {
     pub size: i64,
     pub mtime_ns: i64,
     pub attribution: Attribution,
+    pub exif: PhotoExif,
 }
 
 /// Row used to build a matching pool.
@@ -125,6 +145,10 @@ impl Catalog {
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         conn.execute_batch(SCHEMA)?;
+        // Additive migrations (ignore "duplicate column" on already-migrated catalogues).
+        for col in ["camera TEXT", "lens TEXT", "f_number REAL", "exposure_s REAL", "iso INTEGER", "focal_mm REAL", "taken TEXT", "meta_version INTEGER NOT NULL DEFAULT 0"] {
+            let _ = conn.execute(&format!("ALTER TABLE file ADD COLUMN {col}"), []);
+        }
         conn.execute("INSERT OR IGNORE INTO meta(key, value) VALUES('schema_version', '1')", [])?;
         Ok(Self { conn, path })
     }
@@ -242,7 +266,7 @@ impl Catalog {
     }
 
     pub fn files_of_root(&self, root: i64) -> Result<HashMap<String, FileRec>> {
-        let mut st = self.conn.prepare("SELECT id, rel_path, size, mtime_ns, content_hash, status FROM file WHERE root_id = ?1")?;
+        let mut st = self.conn.prepare("SELECT id, rel_path, size, mtime_ns, content_hash, status, meta_version FROM file WHERE root_id = ?1")?;
         let rows = st.query_map([root], |r| {
             let h: Option<Vec<u8>> = r.get(4)?;
             Ok((
@@ -253,6 +277,7 @@ impl Catalog {
                     mtime_ns: r.get(3)?,
                     hash: h.and_then(|v| v.try_into().ok()),
                     status: r.get(5)?,
+                    meta_version: r.get(6)?,
                 },
             ))
         })?;
@@ -324,7 +349,8 @@ impl Catalog {
     pub fn locations(&self, h: &Hash, libs: &[i64]) -> Result<Vec<Location>> {
         let ids = libs.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(",");
         let sql = format!(
-            "SELECT l.name, r.path, f.rel_path, f.size, f.mtime_ns, f.artist, f.copyright, f.license, f.source
+            "SELECT l.name, r.path, f.rel_path, f.size, f.mtime_ns, f.artist, f.copyright, f.license, f.source,
+                    f.camera, f.lens, f.f_number, f.exposure_s, f.iso, f.focal_mm, f.taken
              FROM file f JOIN root r ON f.root_id = r.id JOIN library l ON r.library_id = l.id
              WHERE f.content_hash = ?1 AND f.status = 0 AND r.library_id IN ({ids}) ORDER BY l.name, f.rel_path"
         );
@@ -336,6 +362,7 @@ impl Catalog {
                 size: r.get(3)?,
                 mtime_ns: r.get(4)?,
                 attribution: Attribution { artist: r.get(5)?, copyright: r.get(6)?, license: r.get(7)?, source: r.get(8)? },
+                exif: PhotoExif { camera: r.get(9)?, lens: r.get(10)?, f_number: r.get(11)?, exposure_s: r.get(12)?, iso: r.get(13)?, focal_mm: r.get(14)?, taken: r.get(15)? },
             })
         })?;
         Ok(rows.collect::<Result<_, _>>()?)

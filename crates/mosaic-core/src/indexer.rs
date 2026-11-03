@@ -11,7 +11,11 @@
 //! unless `verify` is set (re-hashes everything). A missing source folder is
 //! reported and its records are kept (it may be an unplugged drive).
 
-use crate::catalog::{path_str, Catalog, Hash, STATUS_OK, STATUS_SKIPPED};
+use crate::catalog::{path_str, Catalog, Hash, PhotoExif, STATUS_OK, STATUS_SKIPPED};
+
+/// Bump when per-file metadata extraction (EXIF fields) changes. Files with an
+/// older version are re-read (hash + EXIF) but not decoded again.
+pub const META_VERSION: i64 = 1;
 use crate::decode;
 use crate::descriptor::{self, ANALYSIS_SHORT_SIDE, THUMB_SHORT_SIDE};
 use crate::job::Job;
@@ -70,7 +74,7 @@ struct WorkItem {
 }
 
 enum WorkResult {
-    Ok { hash: Hash, attribution: (Option<String>, Option<String>), analysis: Option<Analysis> },
+    Ok { hash: Hash, attribution: (Option<String>, Option<String>), exif: PhotoExif, analysis: Option<Analysis> },
     Skipped(String),
 }
 
@@ -109,7 +113,7 @@ pub fn update_library(cat: &Catalog, lib: i64, opts: &IndexOptions, job: &Job) -
         for (rel, (size, mtime)) in &seen {
             match existing.get(rel) {
                 Some(e) if !opts.verify && e.size == *size && e.mtime_ns == *mtime => {
-                    let fresh = e.status == STATUS_SKIPPED || e.hash.map(|h| known.contains(&h)).unwrap_or(false);
+                    let fresh = e.status == STATUS_SKIPPED || (e.meta_version == META_VERSION && e.hash.map(|h| known.contains(&h)).unwrap_or(false));
                     if fresh {
                         rep.unchanged += 1;
                         continue;
@@ -143,7 +147,7 @@ pub fn update_library(cat: &Catalog, lib: i64, opts: &IndexOptions, job: &Job) -
                     rep.added += 1;
                 }
                 match r {
-                    WorkResult::Ok { hash, attribution, analysis } => {
+                    WorkResult::Ok { hash, attribution, exif, analysis } => {
                         if let Some(a) = analysis {
                             cat.put_descriptor(&hash, &a.desc, a.has_icc, a.had_alpha, &a.thumb)?;
                             rep.decoded += 1;
@@ -151,11 +155,11 @@ pub fn update_library(cat: &Catalog, lib: i64, opts: &IndexOptions, job: &Job) -
                             rep.reused_descriptors += 1;
                         }
                         known.insert(hash);
-                        upsert(cat, w, Some(&hash), STATUS_OK, None, &attribution)?;
+                        upsert(cat, w, Some(&hash), STATUS_OK, None, &attribution, &exif)?;
                     }
                     WorkResult::Skipped(reason) => {
                         rep.skipped.push((w.abs.clone(), reason.clone()));
-                        upsert(cat, w, None, STATUS_SKIPPED, Some(&reason), &(None, None))?;
+                        upsert(cat, w, None, STATUS_SKIPPED, Some(&reason), &(None, None), &PhotoExif::default())?;
                     }
                 }
             }
@@ -188,14 +192,19 @@ pub fn update_library(cat: &Catalog, lib: i64, opts: &IndexOptions, job: &Job) -
     Ok(rep)
 }
 
-fn upsert(cat: &Catalog, w: &WorkItem, hash: Option<&Hash>, status: i64, err: Option<&str>, attr: &(Option<String>, Option<String>)) -> Result<()> {
+#[allow(clippy::too_many_arguments)]
+fn upsert(cat: &Catalog, w: &WorkItem, hash: Option<&Hash>, status: i64, err: Option<&str>, attr: &(Option<String>, Option<String>), x: &PhotoExif) -> Result<()> {
     cat.conn.execute(
-        "INSERT INTO file(root_id, rel_path, size, mtime_ns, content_hash, status, error, artist, copyright)
-         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+        "INSERT INTO file(root_id, rel_path, size, mtime_ns, content_hash, status, error, artist, copyright,
+                          camera, lens, f_number, exposure_s, iso, focal_mm, taken, meta_version)
+         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
          ON CONFLICT(root_id, rel_path) DO UPDATE SET size = excluded.size, mtime_ns = excluded.mtime_ns,
            content_hash = excluded.content_hash, status = excluded.status, error = excluded.error,
-           artist = excluded.artist, copyright = excluded.copyright",
-        params![w.root_id, w.rel, w.size, w.mtime_ns, hash.map(|h| h.to_vec()), status, err, attr.0, attr.1],
+           artist = excluded.artist, copyright = excluded.copyright, camera = excluded.camera, lens = excluded.lens,
+           f_number = excluded.f_number, exposure_s = excluded.exposure_s, iso = excluded.iso,
+           focal_mm = excluded.focal_mm, taken = excluded.taken, meta_version = excluded.meta_version",
+        params![w.root_id, w.rel, w.size, w.mtime_ns, hash.map(|h| h.to_vec()), status, err, attr.0, attr.1,
+                x.camera, x.lens, x.f_number, x.exposure_s, x.iso, x.focal_mm, x.taken, META_VERSION],
     )?;
     Ok(())
 }
@@ -262,12 +271,12 @@ fn process_file(path: &Path, known: &HashSet<Hash>) -> WorkResult {
         return WorkResult::Skipped("unsupported or unrecognised format".into());
     }
     let hash: Hash = *blake3::hash(&bytes).as_bytes();
-    let attribution = exif_attribution(&bytes);
+    let (attribution, exif) = read_exif(&bytes);
     if known.contains(&hash) {
-        return WorkResult::Ok { hash, attribution, analysis: None };
+        return WorkResult::Ok { hash, attribution, exif, analysis: None };
     }
     match analyse(&bytes) {
-        Ok(a) => WorkResult::Ok { hash, attribution, analysis: Some(a) },
+        Ok(a) => WorkResult::Ok { hash, attribution, exif, analysis: Some(a) },
         Err(e) => WorkResult::Skipped(e.to_string()),
     }
 }
@@ -286,9 +295,22 @@ fn analyse(bytes: &[u8]) -> Result<Analysis> {
     Ok(Analysis { desc, thumb, has_icc: d.info.has_icc, had_alpha: d.info.had_alpha })
 }
 
-fn exif_attribution(bytes: &[u8]) -> (Option<String>, Option<String>) {
-    let Ok(ex) = exif::Reader::new().read_from_container(&mut std::io::Cursor::new(bytes)) else { return (None, None) };
-    let get = |tag| {
+type AttributionPair = (Option<String>, Option<String>);
+
+/// Attribution (Artist, Copyright) and camera settings from EXIF, if present.
+pub fn read_exif(bytes: &[u8]) -> (AttributionPair, PhotoExif) {
+    let Ok(ex) = exif::Reader::new().read_from_container(&mut std::io::Cursor::new(bytes)) else { return ((None, None), PhotoExif::default()) };
+    let num = |tag| {
+        ex.get_field(tag, exif::In::PRIMARY).and_then(|f| match &f.value {
+            exif::Value::Rational(v) if !v.is_empty() && v[0].denom != 0 => Some(v[0].to_f64()),
+            exif::Value::SRational(v) if !v.is_empty() && v[0].denom != 0 => Some(v[0].to_f64()),
+            exif::Value::Short(v) if !v.is_empty() => Some(v[0] as f64),
+            exif::Value::Long(v) if !v.is_empty() => Some(v[0] as f64),
+            _ => None,
+        })
+        .filter(|v| v.is_finite() && *v > 0.0)
+    };
+    let text = |tag| {
         ex.get_field(tag, exif::In::PRIMARY).and_then(|f| match &f.value {
             exif::Value::Ascii(v) => {
                 let s = v.iter().map(|b| String::from_utf8_lossy(b).trim().to_string()).collect::<Vec<_>>().join(" ");
@@ -298,7 +320,23 @@ fn exif_attribution(bytes: &[u8]) -> (Option<String>, Option<String>) {
             _ => None,
         })
     };
-    (get(exif::Tag::Artist), get(exif::Tag::Copyright))
+    let make = text(exif::Tag::Make);
+    let model = text(exif::Tag::Model);
+    let camera = match (make, model) {
+        (Some(mk), Some(md)) if md.to_lowercase().starts_with(&mk.to_lowercase()) => Some(md),
+        (Some(mk), Some(md)) => Some(format!("{mk} {md}")),
+        (a, b) => b.or(a),
+    };
+    let x = PhotoExif {
+        camera,
+        lens: text(exif::Tag::LensModel),
+        f_number: num(exif::Tag::FNumber),
+        exposure_s: num(exif::Tag::ExposureTime),
+        iso: num(exif::Tag::PhotographicSensitivity).map(|v| v as i64),
+        focal_mm: num(exif::Tag::FocalLength),
+        taken: text(exif::Tag::DateTimeOriginal).or_else(|| text(exif::Tag::DateTime)),
+    };
+    ((text(exif::Tag::Artist), text(exif::Tag::Copyright)), x)
 }
 
 /// Optional `attribution.csv` in a source folder with a header row containing

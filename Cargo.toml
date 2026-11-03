@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/mosaic-core", "crates/mosaic-cli"]
+members = ["crates/mosaic-core", "crates/mosaic-cli", "crates/mosaic-gui"]
 
 [profile.release]
 debug = 1

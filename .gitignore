@@ -1,3 +1,4 @@
 /target
 *.mosaic-partial-*
 /work
+/e2e-demo

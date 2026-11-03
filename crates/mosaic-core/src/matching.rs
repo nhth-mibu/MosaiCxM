@@ -276,7 +276,11 @@ impl Retrieval {
     }
 
     pub fn query(&self, cands: &[Candidate], target: &TileDesc, k: usize) -> Vec<u32> {
-        let k = k.clamp(1, cands.len().max(1));
+        self.query_k(cands, target, k.clamp(1, cands.len().max(1)))
+    }
+
+    fn query_k(&self, cands: &[Candidate], target: &TileDesc, k: usize) -> Vec<u32> {
+        let k = k.max(1);
         let nz = NonZero::new(k).unwrap();
         match self {
             Retrieval::Mean(t) => t.query(&mean_lab(target)).nearest_n::<SquaredEuclidean<f32>>(nz).execute().into_iter().map(|r| r.item).collect(),
@@ -366,7 +370,9 @@ pub struct MatchStats {
     pub retrieval_ms: f64,
     pub assign_ms: f64,
     pub widened_searches: usize,
-    pub full_scans: usize,
+    /// Rebuilds of the "photos with remaining capacity" index after widening.
+    #[serde(alias = "full_scans")]
+    pub index_rebuilds: usize,
     pub distinct_used: usize,
     pub max_uses: u32,
     /// Mean colour error (ΔE76, tile mean vs photo crop mean) before correction.
@@ -495,6 +501,9 @@ fn assign(
     let use_neighbors = s.repeat_penalty > 0.0 && radius > 0;
     let usage_pen = if s.method == Method::Variety { s.usage_penalty } else { 0.0 };
     let mut neigh: Vec<(u32, f32)> = Vec::new();
+    let mut avail: Option<AvailIndex> = None;
+    let mut exhausted_groups = 0usize;
+    let _ = r;
     for (step, &t) in order.iter().enumerate() {
         if step % 8192 == 0 {
             job.check()?;
@@ -545,25 +554,38 @@ fn assign(
         };
         let mut choice = pick(&lists[t], &uses);
         if choice.is_none() {
-            // All retrieved candidates are at their reuse limit: widen the search.
+            // All retrieved candidates are at their reuse limit: search an index of
+            // candidates that still have capacity (rebuilt when it gets stale), so
+            // a narrow first search never causes a false "infeasible".
             stats.widened_searches += 1;
-            let mut k = lists[t].len().max(16) * 8;
-            while choice.is_none() && k < cands.len() {
-                let wide: Vec<(u32, f32)> = r.query(cands, &target.tiles[t], k).into_iter().map(|c| (c, score(s.method, &target.tiles[t], &cands[c as usize]))).collect();
+            for _attempt in 0..3 {
+                let stale = avail.as_ref().map(|a: &AvailIndex| exhausted_groups > a.exhausted_at + a.size / 10 + 16).unwrap_or(true);
+                if stale {
+                    avail = AvailIndex::build(cands, s.method, &uses, cap, exhausted_groups)?;
+                    stats.index_rebuilds += 1;
+                }
+                let Some(a) = &avail else { break };
+                let wide: Vec<(u32, f32)> = a
+                    .query(cands, &target.tiles[t], (s.candidates.max(16) * 4).min(a.size))
+                    .into_iter()
+                    .map(|c| (c, score(s.method, &target.tiles[t], &cands[c as usize])))
+                    .collect();
                 choice = pick(&wide, &uses);
-                k *= 8;
-            }
-            if choice.is_none() {
-                stats.full_scans += 1;
-                let all: Vec<(u32, f32)> = (0..cands.len() as u32).map(|c| (c, score(s.method, &target.tiles[t], &cands[c as usize]))).collect();
-                choice = pick(&all, &uses);
+                if choice.is_some() {
+                    break;
+                }
+                avail = None; // force a rebuild
             }
         }
         let Some((ci, _)) = choice else {
             // Cannot happen after check_feasible; keep a clear error regardless.
             bail!("internal: no photo with remaining reuse capacity for tile {t}");
         };
-        uses[cands[ci as usize].group as usize] += 1;
+        let g = cands[ci as usize].group as usize;
+        uses[g] += 1;
+        if uses[g] == cap {
+            exhausted_groups += 1;
+        }
         placed[t] = ci;
     }
     // Statistics and optional colour correction.
@@ -603,6 +625,35 @@ fn assign(
     stats.mean_cost = (cost_sum / n as f64) as f32;
     stats.nearby_repeats = count_nearby_repeats(&out, pool, grid.cols, 1);
     Ok(out)
+}
+
+/// k-d tree over the candidates whose photo group still has reuse capacity.
+struct AvailIndex {
+    retrieval: Retrieval,
+    map: Vec<u32>,
+    size: usize,
+    exhausted_at: usize,
+}
+
+impl AvailIndex {
+    fn build(cands: &[Candidate], method: Method, uses: &[u32], cap: u32, exhausted: usize) -> Result<Option<Self>> {
+        let sub: Vec<Candidate> = cands.iter().filter(|c| uses[c.group as usize] < cap).cloned().collect();
+        let map: Vec<u32> = cands.iter().enumerate().filter(|(_, c)| uses[c.group as usize] < cap).map(|(i, _)| i as u32).collect();
+        if sub.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(Self { retrieval: Retrieval::build(&sub, method)?, size: sub.len(), map, exhausted_at: exhausted }))
+    }
+    fn query(&self, _cands: &[Candidate], t: &TileDesc, k: usize) -> Vec<u32> {
+        // Brute retrieval is never used here, so the subset is not needed at query time.
+        let dummy: [Candidate; 0] = [];
+        let k = k.clamp(1, self.size);
+        let ids = match &self.retrieval {
+            Retrieval::Brute { .. } => Vec::new(),
+            r => r.query_k(&dummy, t, k),
+        };
+        ids.into_iter().map(|i| self.map[i as usize]).collect()
+    }
 }
 
 /// Number of tile pairs within `radius` (Chebyshev) that show the same photo group.

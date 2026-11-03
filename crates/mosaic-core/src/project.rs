@@ -278,16 +278,18 @@ pub fn write_manifest(cat: &Catalog, p: &Project, out: &Path) -> Result<usize> {
     let mut t = TempOutput::create(out)?;
     {
         let mut w = std::io::BufWriter::new(t.file());
-        writeln!(w, "content_hash,uses,path,library,artist,copyright,license,source,width,height")?;
+        writeln!(w, "content_hash,uses,path,library,artist,copyright,license,source,width,height,camera,lens,f_number,exposure_s,iso,focal_mm,taken")?;
         for (i, s) in p.sources.iter().enumerate() {
             let h = unhex(&s.hash)?;
             let locs = cat.locations(&h, &libs)?;
             let l = locs.first();
             let a = l.map(|l| l.attribution.clone()).unwrap_or_default();
             let f = |o: &Option<String>| csv_field(o.as_deref().unwrap_or(""));
+            let x = l.map(|l| l.exif.clone()).unwrap_or_default();
+            let n = |o: Option<f64>| o.map(|v| format!("{v}")).unwrap_or_default();
             writeln!(
                 w,
-                "{},{},{},{},{},{},{},{},{},{}",
+                "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
                 s.hash,
                 usage[i],
                 csv_field(&l.map(|l| l.path.display().to_string()).unwrap_or_default()),
@@ -297,7 +299,14 @@ pub fn write_manifest(cat: &Catalog, p: &Project, out: &Path) -> Result<usize> {
                 f(&a.license),
                 f(&a.source),
                 s.width,
-                s.height
+                s.height,
+                f(&x.camera),
+                f(&x.lens),
+                n(x.f_number),
+                n(x.exposure_s),
+                x.iso.map(|v| v.to_string()).unwrap_or_default(),
+                n(x.focal_mm),
+                f(&x.taken)
             )?;
         }
         w.flush()?;
@@ -308,4 +317,173 @@ pub fn write_manifest(cat: &Catalog, p: &Project, out: &Path) -> Result<usize> {
 
 pub fn libraries_refs(cat: &Catalog, ids: &[i64]) -> Result<Vec<LibraryRef>> {
     ids.iter().map(|&id| Ok(LibraryRef { id, name: cat.library_name(id).map_err(|_| anyhow!("library {id} not found"))? })).collect()
+}
+
+// ---------------------------------------------------------------------------
+// Output statistics (written next to every export).
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Range {
+    pub min: f64,
+    pub median: f64,
+    pub max: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Counted {
+    pub value: String,
+    pub photos: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ExifStats {
+    /// Distinct photos with at least one EXIF camera field.
+    pub photos_with_exif: usize,
+    pub photos_without_exif: usize,
+    pub aperture_f: Option<Range>,
+    pub shutter_s: Option<Range>,
+    pub iso: Option<Range>,
+    pub focal_length_mm: Option<Range>,
+    pub apertures: Vec<Counted>,
+    pub shutter_speeds: Vec<Counted>,
+    pub isos: Vec<Counted>,
+    pub cameras: Vec<Counted>,
+    pub lenses: Vec<Counted>,
+    pub date_first: Option<String>,
+    pub date_last: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct OutputStats {
+    pub output: String,
+    pub output_kind: String,
+    pub created_unix: u64,
+    pub details: serde_json::Value,
+    pub artwork_mm: (f64, f64),
+    pub grid: (u32, u32),
+    pub tiles: usize,
+    pub distinct_photos_used: usize,
+    pub max_uses_of_one_photo: u32,
+    pub photos_used_once: usize,
+    pub libraries: Vec<String>,
+    pub method: String,
+    pub seed: u64,
+    pub max_reuse: Option<u32>,
+    pub color_correction: f32,
+    pub motif_blend: f32,
+    pub mean_color_error_delta_e: f32,
+    /// Weighted by tile count: how many tiles show photos taken with each setting.
+    pub tiles_with_exif: u32,
+    pub exif: ExifStats,
+}
+
+fn range(mut v: Vec<f64>) -> Option<Range> {
+    if v.is_empty() {
+        return None;
+    }
+    v.sort_by(|a, b| a.total_cmp(b));
+    Some(Range { min: v[0], median: v[v.len() / 2], max: v[v.len() - 1] })
+}
+
+fn top(mut m: HashMap<String, usize>, n: usize) -> Vec<Counted> {
+    let mut v: Vec<Counted> = m.drain().map(|(value, photos)| Counted { value, photos }).collect();
+    v.sort_by(|a, b| b.photos.cmp(&a.photos).then(a.value.cmp(&b.value)));
+    v.truncate(n);
+    v
+}
+
+pub fn shutter_label(s: f64) -> String {
+    if s >= 1.0 { format!("{s:.1}s").replace(".0s", "s") } else { format!("1/{:.0}s", 1.0 / s) }
+}
+
+/// Statistics of the photos used in a project, including an EXIF summary.
+pub fn output_stats(cat: &Catalog, p: &Project, output: &Path, kind: &str, details: serde_json::Value) -> Result<OutputStats> {
+    let libs = p.library_ids();
+    let usage = p.usage();
+    let (mut ap, mut sh, mut iso, mut fl) = (vec![], vec![], vec![], vec![]);
+    let (mut aps, mut shs, mut isos, mut cams, mut lenses) = (HashMap::new(), HashMap::new(), HashMap::new(), HashMap::new(), HashMap::new());
+    let (mut with, mut tiles_with, mut dates) = (0usize, 0u32, Vec::new());
+    for (i, s) in p.sources.iter().enumerate() {
+        let x = cat.locations(&unhex(&s.hash)?, &libs)?.into_iter().map(|l| l.exif).find(|x| !x.is_empty());
+        let Some(x) = x else { continue };
+        with += 1;
+        tiles_with += usage[i];
+        if let Some(v) = x.f_number {
+            ap.push(v);
+            *aps.entry(format!("f/{v:.1}")).or_insert(0) += 1;
+        }
+        if let Some(v) = x.exposure_s {
+            sh.push(v);
+            *shs.entry(shutter_label(v)).or_insert(0) += 1;
+        }
+        if let Some(v) = x.iso {
+            iso.push(v as f64);
+            *isos.entry(format!("ISO {v}")).or_insert(0) += 1;
+        }
+        if let Some(v) = x.focal_mm {
+            fl.push(v);
+        }
+        if let Some(c) = x.camera {
+            *cams.entry(c).or_insert(0) += 1;
+        }
+        if let Some(c) = x.lens {
+            *lenses.entry(c).or_insert(0) += 1;
+        }
+        if let Some(d) = x.taken {
+            dates.push(d);
+        }
+    }
+    dates.sort();
+    let exif = ExifStats {
+        photos_with_exif: with,
+        photos_without_exif: p.sources.len() - with,
+        aperture_f: range(ap),
+        shutter_s: range(sh),
+        iso: range(iso),
+        focal_length_mm: range(fl),
+        apertures: top(aps, 10),
+        shutter_speeds: top(shs, 10),
+        isos: top(isos, 10),
+        cameras: top(cams, 10),
+        lenses: top(lenses, 10),
+        date_first: dates.first().cloned(),
+        date_last: dates.last().cloned(),
+    };
+    Ok(OutputStats {
+        output: output.display().to_string(),
+        output_kind: kind.to_string(),
+        created_unix: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0),
+        details,
+        artwork_mm: (p.grid.width_mm, p.grid.height_mm),
+        grid: (p.grid.cols, p.grid.rows),
+        tiles: p.tiles.len(),
+        distinct_photos_used: p.sources.len(),
+        max_uses_of_one_photo: usage.iter().copied().max().unwrap_or(0),
+        photos_used_once: usage.iter().filter(|&&u| u == 1).count(),
+        libraries: p.libraries.iter().map(|l| l.name.clone()).collect(),
+        method: p.settings.method.name().into(),
+        seed: p.settings.seed,
+        max_reuse: p.settings.max_reuse,
+        color_correction: p.settings.color_correction,
+        motif_blend: p.settings.motif_blend,
+        mean_color_error_delta_e: p.stats.mean_delta_e,
+        tiles_with_exif: tiles_with,
+        exif,
+    })
+}
+
+/// Path of the statistics file written next to an export: `<output>.stats.json`.
+pub fn stats_path(output: &Path) -> PathBuf {
+    let mut s = output.as_os_str().to_owned();
+    s.push(".stats.json");
+    PathBuf::from(s)
+}
+
+pub fn write_output_stats(cat: &Catalog, p: &Project, output: &Path, kind: &str, details: serde_json::Value) -> Result<(PathBuf, OutputStats)> {
+    let st = output_stats(cat, p, output, kind, details)?;
+    let path = stats_path(output);
+    let mut t = TempOutput::create(&path)?;
+    serde_json::to_writer_pretty(std::io::BufWriter::new(t.file()), &st)?;
+    t.commit()?;
+    Ok((path, st))
 }

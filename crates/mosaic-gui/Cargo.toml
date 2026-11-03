@@ -1,0 +1,21 @@
+[package]
+name = "mosaic-gui"
+version = "0.1.0"
+edition = "2024"
+description = "Desktop interface for the photo mosaic engine (Slint)"
+
+[[bin]]
+name = "mosaic-gui"
+path = "src/main.rs"
+
+[dependencies]
+mosaic-core = { path = "../mosaic-core" }
+slint = "1.18"
+rfd = "0.17"
+anyhow = "1"
+directories = "6"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+serde_json = "1"
+
+[build-dependencies]
+slint-build = "1.18"
