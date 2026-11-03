@@ -32,4 +32,3 @@ The Rust engine runs on both platforms as it is, and Slint can build for both.
   - The layout switches by itself, for example when you rotate a tablet. A manual toggle is also possible.
 - **Foldables.** Switch layout when the device folds or unfolds.
 - **Memory limits.** Phones have less RAM, so very large print exports get tighter limits or stay desktop-only.
-- **Publishing.** Needs an Apple Developer account ($99 a year) and a Google Play account ($25 once), plus store review. Android comes first because it is easier.
