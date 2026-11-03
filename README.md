@@ -109,3 +109,5 @@ Click **Save as JSON…** to save the numbers as a file. Every export also saves
 Building from source, the `mosaic` command-line tool, how matching works, file formats, colour handling, benchmarks and known limits are in the **[technical guide](docs/TECHNICAL.md)**.
 
 The desktop app is made with [Slint](https://slint.dev).
+
+Planned features (AI, then iOS and Android) are in the **[roadmap](ROADMAP.md)**.
