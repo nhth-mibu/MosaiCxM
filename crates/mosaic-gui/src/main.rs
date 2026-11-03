@@ -1,8 +1,8 @@
 //! Desktop interface (Slint). All work is done by `mosaic-core` on worker
 //! threads; the UI thread only reads settings and shows results.
 //!
-//! The window has four colour-coded steps (Photos, Picture, Size & style,
-//! Export) and a preview that is always visible. Photo libraries are handled
+//! The window has five colour-coded steps (Photos, Picture, Size & style,
+//! Export, Statistics) and a preview that is always visible. Photo libraries are handled
 //! automatically: folders go into one "My photos" collection, are scanned when
 //! added and re-checked on every start. The last mosaic is autosaved and
 //! reopened on start.
@@ -18,7 +18,7 @@ use mosaic_core::layout::{PrintSettings, PAPERS};
 use mosaic_core::matching::{GridSpec, MatchError, MatchSettings, Method};
 use mosaic_core::pdf::{export_pdf, plan_pdf};
 use mosaic_core::pool::Pool;
-use mosaic_core::project::{check_sources, libraries_refs, load_target, write_manifest, write_output_stats, Project};
+use mosaic_core::project::{check_sources, libraries_refs, load_target, output_stats, shutter_label, write_manifest, write_output_stats, Counted, OutputStats, Range, Project};
 use mosaic_core::recommend::{recommend, MotifCandidate, MotifSource, RecommendOptions};
 use mosaic_core::render::{render_preview, FileSource};
 use mosaic_core::shape::{Outline, Shape};
@@ -55,6 +55,8 @@ struct State {
     pool: Option<(Vec<i64>, bool, Arc<Pool>)>,
     job: Option<Job>,
     suggestion_paths: Vec<Option<PathBuf>>,
+    /// Statistics of the current project, once counted.
+    stats: Option<Arc<OutputStats>>,
 }
 
 type Shared = Arc<Mutex<State>>;
@@ -476,9 +478,73 @@ fn show_project(ui: &AppWindow, s: &mut State, p: Project, buf: SharedPixelBuffe
     ui.set_has_preview(true);
     ui.set_preview_stale(false);
     ui.set_main_view(0);
+    ui.set_stats_summary(format!("{} photos", thousands(st.distinct_used as u64)).into());
+    ui.set_has_stats(false);
+    s.stats = None;
     s.project = Some(Arc::new(p));
     update_grid_info(ui, s);
     update_export_summary(ui, s);
+}
+
+fn bars(items: &[(String, u64)]) -> Vec<Bar> {
+    let max = items.iter().map(|(_, v)| *v).max().unwrap_or(0).max(1) as f32;
+    items.iter().map(|(l, v)| Bar { label: l.clone().into(), value: thousands(*v).into(), frac: *v as f32 / max }).collect()
+}
+
+fn counted_chart(title: &str, note: String, items: &[Counted]) -> Chart {
+    let v: Vec<(String, u64)> = items.iter().map(|c| (c.value.clone(), c.photos as u64)).collect();
+    Chart { title: title.into(), note: note.into(), bars: ModelRc::new(VecModel::from(bars(&v))) }
+}
+
+fn range_note(r: &Option<Range>, f: impl Fn(f64) -> String) -> String {
+    match r {
+        Some(r) => format!("Typical {}, from {} to {}", f(r.median), f(r.min), f(r.max)),
+        None => String::new(),
+    }
+}
+
+/// Fills the statistics view: number tiles plus bar charts.
+fn show_stats(ui: &AppWindow, p: &Project, st: &OutputStats) {
+    let usage = p.usage();
+    let mut hist = [0u64; 5];
+    for &u in &usage {
+        hist[(u.max(1) as usize - 1).min(4)] += 1;
+    }
+    let use_labels = ["Once", "2 times", "3 times", "4 times", "5 times or more"];
+    let use_items: Vec<(String, u64)> = use_labels.iter().zip(hist).map(|(l, n)| (l.to_string(), n)).collect();
+    let ex = &st.exif;
+    let year = |d: &Option<String>| d.as_ref().and_then(|d| d.get(..4)).map(str::to_string);
+    let taken = match (year(&ex.date_first), year(&ex.date_last)) {
+        (Some(a), Some(b)) if a != b => format!("{a}–{b}"),
+        (Some(a), _) => a,
+        _ => "unknown".into(),
+    };
+    let figures = vec![
+        Figure { label: "tiles".into(), value: thousands(st.tiles as u64).into() },
+        Figure { label: "different photos".into(), value: thousands(st.distinct_photos_used as u64).into() },
+        Figure { label: "photos used only once".into(), value: thousands(st.photos_used_once as u64).into() },
+        Figure { label: "most uses of one photo".into(), value: format!("{}×", st.max_uses_of_one_photo).into() },
+        Figure { label: "photos taken".into(), value: taken.into() },
+    ];
+    let charts = vec![
+        Chart {
+            title: "How often each photo is used".into(),
+            note: format!("Number of photos. Average colour difference per tile: {:.1} ΔE", st.mean_color_error_delta_e).into(),
+            bars: ModelRc::new(VecModel::from(bars(&use_items))),
+        },
+        counted_chart("Cameras", format!("{} of {} photos have camera info", thousands(ex.photos_with_exif as u64), thousands(st.distinct_photos_used as u64)), &ex.cameras),
+        counted_chart("Aperture", range_note(&ex.aperture_f, |v| format!("f/{v:.1}")), &ex.apertures),
+        counted_chart("Shutter speed", range_note(&ex.shutter_s, shutter_label), &ex.shutter_speeds),
+        counted_chart("ISO", range_note(&ex.iso, |v| format!("ISO {v:.0}")), &ex.isos),
+        counted_chart("Lenses", range_note(&ex.focal_length_mm, |v| format!("{v:.0} mm")), &ex.lenses),
+    ];
+    let (left, right): (Vec<_>, Vec<_>) = charts.into_iter().enumerate().partition(|(i, _)| i % 2 == 0);
+    ui.set_stat_figures(ModelRc::new(VecModel::from(figures)));
+    ui.set_stat_charts_left(ModelRc::new(VecModel::from(left.into_iter().map(|(_, c)| c).collect::<Vec<_>>())));
+    ui.set_stat_charts_right(ModelRc::new(VecModel::from(right.into_iter().map(|(_, c)| c).collect::<Vec<_>>())));
+    ui.set_stats_note(if ex.photos_with_exif == 0 { "None of these photos have camera info (EXIF), so only usage is shown.".into() } else { "Bars count photos, not tiles.".into() });
+    ui.set_has_stats(true);
+    ui.set_main_view(3);
 }
 
 fn autosave(s: &State) -> Result<()> {
@@ -902,12 +968,17 @@ fn main() -> Result<()> {
                     let src = resolve(&cat, &p, job)?;
                     let rep = export_raster(&p, &src, &plan, &out, job)?;
                     let details = serde_json::json!({ "format": format!("{:?}", plan.format), "dpi": plan.spec.dpi, "width_px": plan.spec.width_px, "height_px": plan.spec.height_px, "bytes": rep.bytes });
-                    write_output_stats(&cat, &p, &out, "raster", details)?;
+                    let (_, stats) = write_output_stats(&cat, &p, &out, "raster", details)?;
                     let mut msg = format!("Saved {} ({}) in {:.0} s.", rep.path, format_bytes(rep.bytes), rep.elapsed_ms as f64 / 1000.0);
                     if manifest {
                         msg += &save_manifest(&cat, &p, &out)?;
                     }
-                    Ok(Box::new(move |ui: &AppWindow, _s: &mut State| ui.set_export_report(msg.into())))
+                    Ok(Box::new(move |ui: &AppWindow, s: &mut State| {
+                        ui.set_export_report(format!("{msg} Statistics saved next to it as .stats.json.").into());
+                        if s.project.as_ref().is_some_and(|cur| Arc::ptr_eq(cur, &p)) {
+                            s.stats = Some(Arc::new(stats));
+                        }
+                    }))
                 });
             } else {
                 let plan = match print_settings(&ui).and_then(|ps| plan_pdf(&p, &ps)) {
@@ -921,13 +992,71 @@ fn main() -> Result<()> {
                     let overview = render_preview(&cat, &p, (1600 / p.grid.cols.max(p.grid.rows)).clamp(2, 32), job)?;
                     let rep = export_pdf(&p, &src, Some(&overview), &plan, &out, job)?;
                     let details = serde_json::json!({ "paper": plan.print.paper_name, "landscape": plan.print.landscape, "pages": plan.printed_pages(), "overlap_mm": plan.print.overlap_mm, "dpi": plan.print.dpi, "bytes": rep.bytes });
-                    write_output_stats(&cat, &p, &out, "tiled-pdf", details)?;
+                    let (_, stats) = write_output_stats(&cat, &p, &out, "tiled-pdf", details)?;
                     let mut msg = format!("Saved {} ({}, {} pages) in {:.0} s.", rep.path, format_bytes(rep.bytes), plan.printed_pages(), rep.elapsed_ms as f64 / 1000.0);
                     if manifest {
                         msg += &save_manifest(&cat, &p, &out)?;
                     }
-                    Ok(Box::new(move |ui: &AppWindow, _s: &mut State| ui.set_export_report(msg.into())))
+                    Ok(Box::new(move |ui: &AppWindow, s: &mut State| {
+                        ui.set_export_report(format!("{msg} Statistics saved next to it as .stats.json.").into());
+                        if s.project.as_ref().is_some_and(|cur| Arc::ptr_eq(cur, &p)) {
+                            s.stats = Some(Arc::new(stats));
+                        }
+                    }))
                 });
+            }
+        });
+    }
+    // ---------------- 5 Statistics
+    {
+        let (w, s) = (ui.as_weak(), st.clone());
+        ui.on_show_stats(move || {
+            let ui = w.unwrap();
+            let (p, cached) = {
+                let s = s.lock().unwrap();
+                (s.project.clone(), s.stats.clone())
+            };
+            let Some(p) = p else { return };
+            if let Some(st) = cached {
+                return show_stats(&ui, &p, &st);
+            }
+            if ui.get_busy() {
+                return;
+            }
+            run_job(&ui, &s, "Counting statistics", move |_job, dd| {
+                let cat = Catalog::open(&dd)?;
+                let st = output_stats(&cat, &p, &dd.join(LAST_PROJECT), "preview", serde_json::json!({}))?;
+                Ok(Box::new(move |ui: &AppWindow, s: &mut State| {
+                    if s.project.as_ref().is_some_and(|cur| Arc::ptr_eq(cur, &p)) {
+                        let st = Arc::new(st);
+                        s.stats = Some(st.clone());
+                        show_stats(ui, &p, &st);
+                    }
+                }))
+            });
+        });
+    }
+    {
+        let (w, s) = (ui.as_weak(), st.clone());
+        ui.on_save_stats_json(move || {
+            let ui = w.unwrap();
+            let (p, cached, dd) = {
+                let s = s.lock().unwrap();
+                (s.project.clone(), s.stats.clone(), s.data_dir.clone())
+            };
+            let Some(p) = p else { return report_error(&ui, anyhow!("make a preview first")) };
+            let Some(out) = rfd::FileDialog::new().set_title("Save statistics").add_filter("JSON", &["json"]).set_file_name("mosaic-stats.json").save_file() else { return };
+            let r = (|| -> Result<()> {
+                let st = match cached {
+                    Some(st) => st,
+                    None => Arc::new(output_stats(&Catalog::open(&dd)?, &p, &dd.join(LAST_PROJECT), "preview", serde_json::json!({}))?),
+                };
+                std::fs::write(&out, serde_json::to_vec_pretty(&*st)?).with_context(|| format!("cannot write {}", out.display()))?;
+                Ok(())
+            })();
+            match r {
+                Ok(()) => ui.set_status(format!("Statistics saved to {}", out.display()).into()),
+                Err(e) => report_error(&ui, e),
             }
         });
     }

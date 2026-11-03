@@ -84,11 +84,12 @@ Every export also writes `<output>.stats.json`. It records the tile count, disti
 
 `mosaic-gui` is built with [Slint](https://slint.dev) and calls the same engine. See the [README](../README.md) for how to use it. Implementation notes:
 
-- One window with four colour-coded steps on the left and the preview on the right. The UI is in `crates/mosaic-gui/ui/app.slint`; colours are in its `Theme` global and follow the system light/dark setting.
+- One window with five colour-coded steps on the left and the preview on the right. The UI is in `crates/mosaic-gui/ui/app.slint`; colours are in its `Theme` global and follow the system light/dark setting.
 - **Automatic photo handling.** Folders are added to a collection named "My photos" (or to the only library, if exactly one exists from the CLI). Adding a folder starts an index update right away. On start the app runs an index update for every library with folders (an unchanged 100k library takes about 1.5 s), so there is no Update button. A missing folder shows a "Find it…" action, which calls `relink_root` and then updates. Named libraries made with the CLI appear under "Choose collections" when there is more than one.
 - **Style presets** map to methods and reuse limits: Sharp = Classic, max 5 uses; Balanced = Structure-aware, max 3; Varied = Variety-aware, max 2. All other matching settings are under Advanced.
 - **Autosave.** Each new preview is saved to `last-project.json` in the data folder and reopened on start. "Save as…" writes a copy anywhere.
 - **Export** estimates update automatically from `plan_raster` / `plan_pdf`. The optional photo list is written as `<name>-photos-used.csv` next to the export.
+- **Statistics** (step 5) shows `output_stats` for the current project as bar charts: photo-use histogram from `Project::usage`, and the top-10 cameras, lenses, apertures, shutter speeds and ISOs (counted per distinct photo). It is computed on a worker thread the first time the step opens and cached until the next preview; an export replaces it with the stats it wrote. "Save as JSON…" writes the same `OutputStats` JSON as the `<output>.stats.json` files that exports keep writing.
 - Long jobs run on worker threads. The status bar shows progress and has a Cancel button. Errors appear in a banner above the preview.
 
 ## Mosaic methods
