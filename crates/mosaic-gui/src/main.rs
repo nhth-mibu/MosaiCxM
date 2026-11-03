@@ -513,9 +513,16 @@ fn main() -> Result<()> {
                 s.pool = None;
                 let _ = refresh_libraries(ui, s);
                 if let Some((p, buf)) = reopened {
+                    // The picture can be chosen while this job runs; keep that choice.
+                    let chosen = PathBuf::from(ui.get_motif_path().to_string());
                     show_project(ui, s, p, buf, true);
                     ui.set_project_name("Last mosaic (autosaved)".into());
-                    ui.set_open_step(3);
+                    if !chosen.as_os_str().is_empty() && chosen.as_path() != Path::new(ui.get_motif_path().as_str()) {
+                        show_motif(ui, &chosen);
+                        mark_stale(ui);
+                    } else {
+                        ui.set_open_step(3);
+                    }
                 }
                 update_grid_info(ui, s);
                 ui.set_status(msg.into());
