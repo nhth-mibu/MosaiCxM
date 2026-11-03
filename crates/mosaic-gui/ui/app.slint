@@ -1,9 +1,23 @@
-import { Button, LineEdit, SpinBox, Slider, CheckBox, ComboBox, TabWidget, GroupBox, ProgressIndicator, ScrollView, HorizontalBox, VerticalBox, Palette, Switch } from "std-widgets.slint";
+// MosaiCxM desktop UI: one screen with four colour-coded steps on the left
+// and the preview always visible on the right.
+//
+// Colour coding (also in the README):
+//   1 Photos        teal
+//   2 Picture       coral
+//   3 Size & style  amber
+//   4 Export        violet
 
-export struct LibraryRow {
+import { Button, LineEdit, SpinBox, Slider, CheckBox, ComboBox, ScrollView, Palette, Switch } from "std-widgets.slint";
+
+export struct FolderRow {
+    path: string,
+    collection: string,
+    missing: bool,
+}
+
+export struct CollectionRow {
     name: string,
     summary: string,
-    folders: string,
     selected: bool,
 }
 
@@ -16,54 +30,221 @@ export struct SuggestionRow {
     has-preview: bool,
 }
 
+global Theme {
+    out property <bool> dark: Palette.color-scheme == ColorScheme.dark;
+    out property <color> bg: dark ? #12161f : #f6f7fb;
+    out property <color> surface: dark ? #1a202c : #ffffff;
+    out property <color> line: dark ? #2c3445 : #dfe3ec;
+    out property <color> fg: dark ? #e7eaf2 : #1d2433;
+    out property <color> muted: dark ? #9aa3b5 : #5d6577;
+    out property <color> ink: dark ? #0d1118 : #1f2a3c;
+
+    out property <color> teal: dark ? #2cc2ad : #0f9d8a;
+    out property <color> coral: dark ? #ff7b70 : #e2493d;
+    out property <color> amber: dark ? #f4bb42 : #d99400;
+    out property <color> violet: dark ? #9487ff : #6c5ce7;
+
+    out property <color> teal-soft: dark ? #123a35 : #dff4f0;
+    out property <color> coral-soft: dark ? #42201d : #fde5e2;
+    out property <color> amber-soft: dark ? #3d3114 : #fcf0d6;
+    out property <color> violet-soft: dark ? #2a2550 : #e9e6fd;
+}
+
 component Hint inherits Text {
-    color: Palette.foreground.with-alpha(0.65);
+    color: Theme.muted;
     font-size: 12px;
     wrap: word-wrap;
 }
 
-component SectionTitle inherits Text {
-    font-size: 15px;
-    font-weight: 600;
+// Wrapped hint inside a step card. The width is fixed so the layout can
+// work out how many lines the text needs (the step column is fixed too).
+component StepHint inherits Hint {
+    width: 304px;
 }
 
-component LabeledField inherits HorizontalLayout {
+component Label inherits Text {
+    color: Theme.fg;
+    vertical-alignment: center;
+}
+
+component Field inherits HorizontalLayout {
     in property <string> label;
     spacing: 8px;
-    Text { text: root.label; vertical-alignment: center; min-width: 130px; }
+    Label { text: root.label; min-width: 120px; font-size: 13px; }
     @children
 }
 
+// Filled button in a step colour.
+component ColorButton inherits Rectangle {
+    in property <string> text;
+    in property <color> tint: Theme.teal;
+    in property <bool> enabled: true;
+    callback clicked();
+    min-width: label.preferred-width + 28px;
+    height: 32px;
+    border-radius: 8px;
+    background: !root.enabled ? Theme.line : ta.pressed ? root.tint.darker(0.2) : ta.has-hover ? root.tint.brighter(0.1) : root.tint;
+    ta := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: root.enabled ? pointer : default;
+        clicked => { root.clicked(); }
+    }
+    label := Text {
+        text: root.text;
+        color: root.enabled ? #ffffff : Theme.muted;
+        font-weight: 600;
+        font-size: 13px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+// Text-only button, used for "Advanced", "Why?" and similar small actions.
+component LinkButton inherits Text {
+    callback clicked();
+    in property <color> tint: Theme.muted;
+    color: ta.has-hover ? Theme.fg : root.tint;
+    font-size: 12px;
+    ta := TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
+}
+
+// Segmented control: one choice out of a few.
+component Segmented inherits Rectangle {
+    in property <[string]> options;
+    in-out property <int> current: 0;
+    in property <color> tint: Theme.amber;
+    callback changed(int);
+    height: 32px;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: Theme.line;
+    clip: true;
+    HorizontalLayout {
+        for opt[i] in root.options: Rectangle {
+            background: i == root.current ? root.tint : (t.has-hover ? Theme.bg : Theme.surface);
+            Text {
+                text: opt;
+                font-size: 12px;
+                font-weight: i == root.current ? 600 : 400;
+                color: i == root.current ? #ffffff : Theme.fg;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+            t := TouchArea {
+                mouse-cursor: pointer;
+                clicked => {
+                    root.current = i;
+                    root.changed(i);
+                }
+            }
+        }
+    }
+}
+
+component Chip inherits Rectangle {
+    in property <string> text;
+    in property <color> dot: Theme.teal;
+    height: 26px;
+    min-width: lbl.preferred-width + 34px;
+    border-radius: 13px;
+    background: Theme.surface;
+    border-width: 1px;
+    border-color: Theme.line;
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        spacing: 6px;
+        alignment: center;
+        Rectangle { width: 8px; height: 8px; y: (parent.height - 8px) / 2; border-radius: 4px; background: root.dot; }
+        lbl := Text { text: root.text; font-size: 12px; color: Theme.fg; vertical-alignment: center; }
+    }
+}
+
+// Header line of a step card: coloured number (or tick), title, summary.
+component StepHeader inherits Rectangle {
+    in property <string> number;
+    in property <string> title;
+    in property <string> summary;
+    in property <bool> done;
+    in property <color> tint;
+    callback clicked();
+    height: 30px;
+    TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
+    HorizontalLayout {
+        spacing: 10px;
+        Rectangle {
+            width: 26px;
+            height: 26px;
+            y: 2px;
+            border-radius: 13px;
+            background: root.tint;
+            Text { text: root.done ? "✓" : root.number; color: #ffffff; font-weight: 700; font-size: 13px; }
+        }
+        Text { text: root.title; font-weight: 600; font-size: 15px; color: Theme.fg; vertical-alignment: center; }
+        Text { text: root.summary; font-size: 12px; color: Theme.muted; horizontal-alignment: right; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; }
+    }
+}
+
+component StepCard inherits Rectangle {
+    in property <bool> open;
+    in property <color> tint;
+    in property <color> soft;
+    border-radius: 10px;
+    border-width: root.open ? 2px : 1px;
+    border-color: root.open ? root.tint : Theme.line;
+    background: root.open ? root.soft : Theme.surface;
+    VerticalLayout {
+        padding: 12px;
+        spacing: 10px;
+        @children
+    }
+}
+
 export component AppWindow inherits Window {
-    title: "MosaiCxM – photo mosaic";
+    title: "MosaiCxM";
     preferred-width: 1280px;
-    preferred-height: 820px;
+    preferred-height: 840px;
+    min-width: 960px;
+    min-height: 640px;
     icon: @image-url("icon.png");
+    background: Theme.bg;
 
-    // ----- shared state
-    in-out property <[LibraryRow]> libraries;
-    in-out property <int> current-library: -1;
-    in-out property <string> new-library-name;
-    in-out property <string> folder-path;
-    in-out property <string> relink-old;
-    in-out property <string> relink-new;
-    in-out property <string> library-report;
+    // ----- which step is open, and what the big area on the right shows
+    in-out property <int> open-step: 1;
+    in-out property <int> main-view: 0; // 0 preview, 1 motif suggestions, 2 info text
+    in-out property <string> info-title;
+    in-out property <string> info-text;
+    in-out property <string> notice; // error or important message shown above the preview
 
+    // ----- 1 Photos
+    in-out property <[FolderRow]> folders;
+    in-out property <[CollectionRow]> collections;
+    in-out property <string> photos-summary: "No photos yet";
+    in-out property <int> photo-count: 0;
+    in-out property <int> skipped-count: 0;
+    in-out property <bool> show-collections: false;
+
+    // ----- 2 Picture
     in-out property <string> motif-path;
+    in-out property <string> motif-name;
     in-out property <image> motif-image;
     in-out property <string> suggest-folder;
     in-out property <int> suggest-from-library: 30;
     in-out property <[SuggestionRow]> suggestions;
     in-out property <string> suggest-report;
 
+    // ----- 3 Size & style
     in-out property <string> width-mm: "1000";
     in-out property <string> height-mm: "750";
-    in-out property <bool> use-tile-size: true;
     in-out property <string> tile-mm: "15";
+    in-out property <bool> use-grid: false;
     in-out property <int> cols: 60;
     in-out property <int> rows: 45;
-    in-out property <int> method-index: 1;
-    in-out property <string> method-help;
+    in-out property <int> style-index: 1;
+    in-out property <string> style-help;
+    in-out property <string> grid-info;
+    in-out property <string> size-summary;
+    in-out property <bool> size-advanced: false;
     in-out property <bool> unlimited-reuse: false;
     in-out property <int> max-reuse: 3;
     in-out property <float> repeat-penalty: 0;
@@ -73,16 +254,21 @@ export component AppWindow inherits Window {
     in-out property <int> seed: 1;
     in-out property <float> color-correction: 0;
     in-out property <float> motif-blend: 0;
-    in-out property <string> grid-info;
 
+    // ----- preview
     in-out property <image> preview-image;
     in-out property <bool> has-preview: false;
+    in-out property <bool> preview-stale: false;
+    in-out property <string> chip-photos;
+    in-out property <string> chip-distance;
+    in-out property <string> chip-repeats;
     in-out property <string> match-report;
-    in-out property <string> project-path;
+    in-out property <string> project-name: "New mosaic";
 
+    // ----- 4 Export
+    in-out property <int> export-kind: 1; // 0 image file, 1 print pages (PDF)
     in-out property <int> raster-format-index: 0;
     in-out property <string> export-dpi: "300";
-    in-out property <string> export-path;
     in-out property <int> paper-index: 1;
     in-out property <string> custom-w: "600";
     in-out property <string> custom-h: "900";
@@ -91,7 +277,9 @@ export component AppWindow inherits Window {
     in-out property <string> overlap-mm: "10";
     in-out property <string> pdf-dpi: "300";
     in-out property <bool> marks: true;
-    in-out property <string> pdf-path;
+    in-out property <bool> save-manifest: true;
+    in-out property <bool> export-advanced: false;
+    in-out property <string> export-summary;
     in-out property <string> export-report;
 
     // ----- job status
@@ -100,301 +288,527 @@ export component AppWindow inherits Window {
     in-out property <float> progress: 0;
     in-out property <bool> progress-known: false;
 
-    callback create-library();
-    callback remove-library();
-    callback select-library(int);
-    callback toggle-library(int, bool);
-    callback browse-folder();
     callback add-folder();
-    callback remove-folder();
-    callback relink();
-    callback update-index();
+    callback remove-folder(int);
+    callback find-folder(int);
+    callback toggle-collection(int, bool);
     callback show-skipped();
 
     callback browse-motif();
-    callback motif-entered();
     callback browse-suggest-folder();
     callback suggest();
     callback use-suggestion(int);
 
-    callback method-changed(int);
+    callback style-changed(int);
     callback settings-changed();
     callback generate();
     callback save-project();
     callback open-project();
 
-    callback estimate-raster();
-    callback export-raster();
-    callback estimate-pdf();
-    callback export-pdf();
-    callback export-manifest();
+    callback export-settings-changed();
+    callback export();
     callback cancel();
 
-    VerticalBox {
-        padding: 10px;
-        TabWidget {
+    // Marks the preview as out of date and refreshes the grid summary.
+    function changed() {
+        root.preview-stale = root.has-preview;
+        root.settings-changed();
+    }
+
+    VerticalLayout {
+        // ===================== header band
+        Rectangle {
+            height: 52px;
+            background: Theme.ink;
+            HorizontalLayout {
+                padding-left: 16px;
+                padding-right: 12px;
+                spacing: 12px;
+                HorizontalLayout {
+                    spacing: 3px;
+                    horizontal-stretch: 0;
+                    for c in [Theme.teal, Theme.coral, Theme.amber, Theme.violet]: Rectangle {
+                        width: 10px;
+                        height: 10px;
+                        y: 21px;
+                        border-radius: 2px;
+                        background: c;
+                    }
+                }
+                Text { text: "MosaiCxM"; horizontal-stretch: 0; color: #ffffff; font-size: 18px; font-weight: 700; vertical-alignment: center; }
+                Text { text: root.project-name; color: #b8c0d0; font-size: 13px; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; }
+                for item[i] in ["Open…", "Save as…"]: Rectangle {
+                    width: t.preferred-width + 24px;
+                    height: 32px;
+                    y: 10px;
+                    border-radius: 6px;
+                    background: ta.has-hover ? #ffffff22 : transparent;
+                    t := Text { text: item; color: (i == 1 && !root.has-preview) ? #6d7586 : #e9edf5; font-size: 13px; }
+                    ta := TouchArea {
+                        enabled: !root.busy && (i == 0 || root.has-preview);
+                        mouse-cursor: pointer;
+                        clicked => { if (i == 0) { root.open-project(); } else { root.save-project(); } }
+                    }
+                }
+            }
+        }
+
+        HorizontalLayout {
             vertical-stretch: 1;
 
-            // ===================== 1. Libraries
-            Tab {
-                title: "1 · Source photos";
-                HorizontalBox {
-                    VerticalBox {
-                        width: 380px;
-                        SectionTitle { text: "Photo libraries"; }
-                        Hint { text: "A library is a named set of folders with your source photos. Photos are only read, never changed. Tick the libraries to combine for the mosaic."; }
-                        ScrollView {
-                            vertical-stretch: 1;
-                            VerticalLayout {
-                                alignment: start;
-                                spacing: 4px;
-                                if root.libraries.length == 0: Hint { text: "No libraries yet. Create one below, then add folders."; }
-                                for lib[i] in root.libraries: Rectangle {
-                                    height: 54px;
-                                    background: i == root.current-library ? Palette.selection-background.with-alpha(0.35) : transparent;
-                                    border-radius: 6px;
-                                    TouchArea { clicked => { root.select-library(i); } }
-                                    HorizontalLayout {
-                                        padding: 6px;
-                                        spacing: 8px;
-                                        CheckBox {
-                                            checked: lib.selected;
-                                            toggled => { root.toggle-library(i, self.checked); }
-                                        }
-                                        VerticalLayout {
-                                            Text { text: lib.name; font-weight: 600; }
-                                            Hint { text: lib.summary; }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        HorizontalBox {
-                            padding: 0;
-                            LineEdit { placeholder-text: "New library name"; text <=> root.new-library-name; }
-                            Button { text: "Create"; enabled: !root.busy; clicked => { root.create-library(); } }
-                        }
-                        Button { text: "Remove selected library (keeps photos)"; enabled: !root.busy && root.current-library >= 0; clicked => { root.remove-library(); } }
-                    }
-                    VerticalBox {
-                        SectionTitle { text: root.current-library >= 0 ? "Folders of " + root.libraries[root.current-library].name : "Select a library"; }
-                        Text { text: root.current-library >= 0 ? root.libraries[root.current-library].folders : ""; wrap: word-wrap; }
-                        GroupBox {
-                            vertical-stretch: 0;
-                            title: "Add or remove a source folder";
-                            VerticalBox {
-                                HorizontalBox {
-                                    padding: 0;
-                                    LineEdit { placeholder-text: "Folder path"; text <=> root.folder-path; }
-                                    Button { text: "Browse…"; clicked => { root.browse-folder(); } }
-                                }
-                                HorizontalBox {
-                                    padding: 0;
-                                    Button { text: "Add folder"; enabled: !root.busy && root.current-library >= 0; clicked => { root.add-folder(); } }
-                                    Button { text: "Remove folder"; enabled: !root.busy && root.current-library >= 0; clicked => { root.remove-folder(); } }
-                                }
-                            }
-                        }
-                        GroupBox {
-                            vertical-stretch: 0;
-                            title: "Relink a moved folder (no re-analysis of unchanged photos)";
-                            VerticalBox {
-                                LineEdit { placeholder-text: "Old folder path"; text <=> root.relink-old; }
-                                LineEdit { placeholder-text: "New folder path"; text <=> root.relink-new; }
-                                Button { text: "Relink"; enabled: !root.busy && root.current-library >= 0; clicked => { root.relink(); } }
-                            }
-                        }
-                        HorizontalBox {
-                            padding: 0;
-                            Button { text: "Update index"; primary: true; enabled: !root.busy && root.current-library >= 0; clicked => { root.update-index(); } }
-                            Button { text: "Show skipped files"; enabled: root.current-library >= 0; clicked => { root.show-skipped(); } }
-                        }
-                        ScrollView {
-                            vertical-stretch: 1;
-                            Text { text: root.library-report; wrap: word-wrap; width: parent.width - 16px; }
-                        }
-                    }
-                }
-            }
-
-            // ===================== 2. Motif
-            Tab {
-                title: "2 · Target motif";
-                HorizontalBox {
-                    VerticalBox {
-                        width: 420px;
-                        SectionTitle { text: "Target motif"; }
-                        Hint { text: "The image the mosaic should resemble. It is independent of the source photos."; }
-                        HorizontalBox {
-                            padding: 0;
-                            LineEdit { placeholder-text: "Motif image path (press Enter)"; text <=> root.motif-path; accepted => { root.motif-entered(); } }
-                            Button { text: "Browse…"; clicked => { root.browse-motif(); } }
-                        }
-                        Rectangle {
-                            vertical-stretch: 1;
-                            background: Palette.alternate-background;
-                            border-radius: 8px;
-                            Image { source: root.motif-image; image-fit: contain; width: parent.width - 12px; height: parent.height - 12px; }
-                        }
-                    }
-                    VerticalBox {
-                        SectionTitle { text: "Motif suggestions for the selected libraries"; }
-                        Hint { text: "Ranks candidate motifs by estimated technical fit with the ticked libraries and current grid, method and reuse settings: colour coverage, enough distinct photos, repetition pressure, contrast and detail lost at this tile size. Scores do not measure artistic quality."; }
-                        HorizontalBox {
-                            padding: 0;
-                            LineEdit { placeholder-text: "Folder of candidate motifs (optional)"; text <=> root.suggest-folder; }
-                            Button { text: "Browse…"; clicked => { root.browse-suggest-folder(); } }
-                        }
-                        HorizontalBox {
-                            padding: 0;
-                            Text { text: "Also try photos from the libraries:"; vertical-alignment: center; }
-                            SpinBox { minimum: 0; maximum: 500; value <=> root.suggest-from-library; }
-                            Button { text: "Suggest motifs"; primary: true; enabled: !root.busy; clicked => { root.suggest(); } }
-                        }
-                        Hint { text: root.suggest-report; }
-                        ScrollView {
-                            vertical-stretch: 1;
-                            VerticalLayout {
-                                spacing: 6px;
-                                for s[i] in root.suggestions: Rectangle {
-                                    height: 110px;
-                                    background: Palette.alternate-background;
-                                    border-radius: 6px;
-                                    HorizontalLayout {
-                                        padding: 6px;
-                                        spacing: 10px;
-                                        Image { source: s.preview; width: 130px; image-fit: contain; }
-                                        VerticalLayout {
-                                            Text { text: s.score + "  " + s.label; font-weight: 600; overflow: elide; }
-                                            Hint { text: s.notes; vertical-stretch: 1; }
-                                        }
-                                        Button { text: "Use"; enabled: s.path != ""; clicked => { root.use-suggestion(i); } }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            // ===================== 3. Settings + preview
-            Tab {
-                title: "3 · Mosaic settings & preview";
-                HorizontalBox {
-                    ScrollView {
-                        width: 430px;
-                        VerticalBox {
-                            SectionTitle { text: "Size and grid"; }
-                            LabeledField { label: "Width (mm)"; LineEdit { text <=> root.width-mm; edited => { root.settings-changed(); } } }
-                            LabeledField { label: "Height (mm)"; LineEdit { text <=> root.height-mm; edited => { root.settings-changed(); } } }
-                            Switch { text: "Set tile size (otherwise columns × rows)"; checked <=> root.use-tile-size; toggled => { root.settings-changed(); } }
-                            if root.use-tile-size: LabeledField { label: "Tile size (mm)"; LineEdit { text <=> root.tile-mm; edited => { root.settings-changed(); } } }
-                            if !root.use-tile-size: LabeledField {
-                                label: "Columns × rows";
-                                SpinBox { minimum: 1; maximum: 2000; value <=> root.cols; edited => { root.settings-changed(); } }
-                                SpinBox { minimum: 1; maximum: 2000; value <=> root.rows; edited => { root.settings-changed(); } }
-                            }
-                            Hint { text: root.grid-info; }
-
-                            SectionTitle { text: "Mosaic method"; }
-                            ComboBox {
-                                model: ["A · Classic colour", "B · Structure-aware", "C · Variety-aware"];
-                                current-index <=> root.method-index;
-                                selected => { root.method-changed(self.current-index); }
-                            }
-                            Hint { text: root.method-help; }
-
-                            SectionTitle { text: "Photo reuse"; }
-                            CheckBox { text: "Unlimited reuse"; checked <=> root.unlimited-reuse; }
-                            LabeledField { label: "Max uses per photo"; SpinBox { enabled: !root.unlimited-reuse; minimum: 1; maximum: 10000; value <=> root.max-reuse; } }
-                            LabeledField { label: "Nearby repeat penalty"; Slider { minimum: 0; maximum: 30; value <=> root.repeat-penalty; } Text { text: round(root.repeat-penalty) + " ΔE"; min-width: 50px; } }
-                            LabeledField { label: "Repeat radius (tiles)"; SpinBox { minimum: 1; maximum: 20; value <=> root.repeat-radius; } }
-                            LabeledField { label: "Per-use penalty"; Slider { enabled: root.method-index == 2; minimum: 0; maximum: 10; value <=> root.usage-penalty; } Text { text: round(root.usage-penalty * 10) / 10 + " ΔE"; min-width: 50px; } }
-                            CheckBox { text: "Try off-centre crops"; checked <=> root.crop-offsets; }
-                            LabeledField { label: "Seed"; SpinBox { minimum: 0; maximum: 1000000; value <=> root.seed; } }
-
-                            SectionTitle { text: "Optional adjustments (off by default)"; }
-                            Hint { text: "These change how the source photos look. Higher values make the motif easier to recognise; lower values keep each photo true to itself. Both are saved in the project and noted in exports."; }
-                            LabeledField { label: "Colour correction"; Slider { minimum: 0; maximum: 0.5; value <=> root.color-correction; } Text { text: round(root.color-correction * 100) + " %"; min-width: 50px; } }
-                            LabeledField { label: "Motif blend"; Slider { minimum: 0; maximum: 0.5; value <=> root.motif-blend; } Text { text: round(root.motif-blend * 100) + " %"; min-width: 50px; } }
-                            Hint { text: "Viewing distance: small tiles (≤ 15 mm) blend into the motif from about 2 m away; large tiles show individual photos better but need more distance to read the motif."; }
-                        }
-                    }
-                    VerticalBox {
-                        HorizontalBox {
-                            padding: 0;
-                            Button { text: "Generate preview"; primary: true; enabled: !root.busy; clicked => { root.generate(); } }
-                            Button { text: "Save project…"; enabled: !root.busy && root.has-preview; clicked => { root.save-project(); } }
-                            Button { text: "Open project…"; enabled: !root.busy; clicked => { root.open-project(); } }
-                        }
-                        Hint { text: root.project-path == "" ? "Preview uses stored thumbnails, so it works even if the original photos are offline." : "Project: " + root.project-path; }
-                        Rectangle {
-                            vertical-stretch: 1;
-                            background: Palette.alternate-background;
-                            border-radius: 8px;
-                            if root.has-preview: Image { source: root.preview-image; image-fit: contain; width: parent.width - 12px; height: parent.height - 12px; }
-                            if !root.has-preview: Hint { text: "Pick libraries and a motif, then press Generate preview."; horizontal-alignment: center; }
-                        }
-                        Text { text: root.match-report; wrap: word-wrap; }
-                    }
-                }
-            }
-
-            // ===================== 4. Export
-            Tab {
-                title: "4 · Export & print";
-                HorizontalBox {
-                    VerticalBox {
-                        width: 470px;
+            // ===================== steps
+            Rectangle {
+                width: 360px;
+                background: Theme.surface;
+                Rectangle { x: parent.width - 1px; width: 1px; background: Theme.line; }
+                steps-scroll := ScrollView {
+                    VerticalLayout {
+                        width: steps-scroll.visible-width;
+                        padding: 14px;
+                        spacing: 10px;
                         alignment: start;
-                        SectionTitle { text: "Full mosaic image"; }
-                        LabeledField { label: "Format"; ComboBox { model: ["BigTIFF (tiled, any size)", "PNG (streamed)", "JPEG (≤ 65,535 px)"]; current-index <=> root.raster-format-index; } }
-                        LabeledField { label: "Print resolution (DPI)"; LineEdit { text <=> root.export-dpi; } }
-                        LabeledField { label: "Save as"; LineEdit { text <=> root.export-path; placeholder-text: "Choose when exporting"; } }
-                        HorizontalBox {
-                            padding: 0;
-                            Button { text: "Estimate"; enabled: root.has-preview; clicked => { root.estimate-raster(); } }
-                            Button { text: "Export image…"; primary: true; enabled: !root.busy && root.has-preview; clicked => { root.export-raster(); } }
+
+                        // ---------- 1 Photos (teal)
+                        StepCard {
+                            open: root.open-step == 1;
+                            tint: Theme.teal;
+                            soft: Theme.teal-soft;
+                            StepHeader {
+                                number: "1";
+                                title: "Photos";
+                                summary: root.photos-summary;
+                                done: root.photo-count > 0;
+                                tint: Theme.teal;
+                                clicked => { root.open-step = 1; }
+                            }
+                            if root.open-step == 1: VerticalLayout {
+                                spacing: 8px;
+                                StepHint { text: "Add the folders with your photos. They are scanned right away and checked again each time the app starts. Photos are only read, never changed."; }
+                                for f[i] in root.folders: Rectangle {
+                                    border-radius: 6px;
+                                    background: f.missing ? Theme.amber-soft : transparent;
+                                    border-width: f.missing ? 1px : 0px;
+                                    border-color: Theme.amber;
+                                    HorizontalLayout {
+                                        padding: f.missing ? 6px : 2px;
+                                        spacing: 6px;
+                                        VerticalLayout {
+                                            horizontal-stretch: 1;
+                                            Text { text: f.path; font-size: 12px; color: Theme.fg; overflow: elide; }
+                                            if f.missing: Text { text: "Folder not found. Was it moved or is the drive unplugged?"; font-size: 11px; color: Theme.fg; wrap: word-wrap; }
+                                        }
+                                        if f.missing: LinkButton {
+                                            text: "Find it…";
+                                            tint: Theme.fg;
+                                            font-weight: 600;
+                                            vertical-alignment: center;
+                                            clicked => { root.find-folder(i); }
+                                        }
+                                        LinkButton {
+                                            text: "Remove";
+                                            vertical-alignment: center;
+                                            clicked => { root.remove-folder(i); }
+                                        }
+                                    }
+                                }
+                                HorizontalLayout {
+                                    spacing: 10px;
+                                    alignment: start;
+                                    ColorButton {
+                                        text: "+ Add folder";
+                                        tint: Theme.teal;
+                                        enabled: !root.busy;
+                                        clicked => { root.add-folder(); }
+                                    }
+                                    if root.skipped-count > 0: LinkButton {
+                                        text: root.skipped-count + " files skipped · why?";
+                                        vertical-alignment: center;
+                                        clicked => { root.show-skipped(); }
+                                    }
+                                }
+                                if root.collections.length > 1: LinkButton {
+                                    text: (root.show-collections ? "▾" : "▸") + " Choose collections";
+                                    clicked => { root.show-collections = !root.show-collections; }
+                                }
+                                if root.collections.length > 1 && root.show-collections: VerticalLayout {
+                                    for c[i] in root.collections: CheckBox {
+                                        text: c.name + "  (" + c.summary + ")";
+                                        checked: c.selected;
+                                        toggled => {
+                                            root.toggle-collection(i, self.checked);
+                                            root.changed();
+                                        }
+                                    }
+                                }
+                            }
                         }
-                        SectionTitle { text: "Tiled print PDF (print pages)"; }
-                        LabeledField { label: "Paper"; ComboBox { model: ["A4", "A3", "A2", "A1", "A0", "Letter", "Legal", "Tabloid", "Custom"]; current-index <=> root.paper-index; } }
-                        if root.paper-index == 8: LabeledField { label: "Custom W × H (mm)"; LineEdit { text <=> root.custom-w; } LineEdit { text <=> root.custom-h; } }
-                        CheckBox { text: "Landscape"; checked <=> root.landscape; }
-                        LabeledField { label: "Printer margin (mm)"; LineEdit { text <=> root.margin-mm; } }
-                        LabeledField { label: "Overlap for gluing (mm)"; LineEdit { text <=> root.overlap-mm; } }
-                        LabeledField { label: "Print resolution (DPI)"; LineEdit { text <=> root.pdf-dpi; } }
-                        CheckBox { text: "Crop marks, alignment marks, labels and ruler"; checked <=> root.marks; }
-                        HorizontalBox {
-                            padding: 0;
-                            Button { text: "Estimate"; enabled: root.has-preview; clicked => { root.estimate-pdf(); } }
-                            Button { text: "Export PDF…"; primary: true; enabled: !root.busy && root.has-preview; clicked => { root.export-pdf(); } }
+
+                        // ---------- 2 Picture (coral)
+                        StepCard {
+                            open: root.open-step == 2;
+                            tint: Theme.coral;
+                            soft: Theme.coral-soft;
+                            StepHeader {
+                                number: "2";
+                                title: "Picture";
+                                summary: root.motif-name == "" ? "Not chosen" : root.motif-name;
+                                done: root.motif-path != "";
+                                tint: Theme.coral;
+                                clicked => { root.open-step = 2; }
+                            }
+                            if root.open-step == 2: VerticalLayout {
+                                spacing: 8px;
+                                StepHint { text: "The picture your mosaic should look like. Faces, animals and bold shapes work best."; }
+                                if root.motif-path != "": Rectangle {
+                                    height: 150px;
+                                    border-radius: 8px;
+                                    background: Theme.bg;
+                                    Image { source: root.motif-image; image-fit: contain; width: parent.width - 8px; height: parent.height - 8px; }
+                                }
+                                HorizontalLayout {
+                                    spacing: 10px;
+                                    alignment: start;
+                                    ColorButton {
+                                        text: root.motif-path == "" ? "Choose picture…" : "Change picture…";
+                                        tint: Theme.coral;
+                                        enabled: !root.busy;
+                                        clicked => { root.browse-motif(); }
+                                    }
+                                    LinkButton {
+                                        text: "Help me choose";
+                                        tint: Theme.coral;
+                                        font-weight: 600;
+                                        vertical-alignment: center;
+                                        clicked => { root.main-view = 1; }
+                                    }
+                                }
+                            }
                         }
-                        Button { text: "Export manifest of photos used (CSV)…"; enabled: !root.busy && root.has-preview; clicked => { root.export-manifest(); } }
+
+                        // ---------- 3 Size & style (amber)
+                        StepCard {
+                            open: root.open-step == 3;
+                            tint: Theme.amber;
+                            soft: Theme.amber-soft;
+                            StepHeader {
+                                number: "3";
+                                title: "Size & style";
+                                summary: root.size-summary;
+                                done: root.has-preview && !root.preview-stale;
+                                tint: Theme.amber;
+                                clicked => { root.open-step = 3; }
+                            }
+                            if root.open-step == 3: VerticalLayout {
+                                spacing: 8px;
+                                Field { label: "Width (mm)"; LineEdit { text <=> root.width-mm; edited => { root.changed(); } } }
+                                Field { label: "Height (mm)"; LineEdit { text <=> root.height-mm; edited => { root.changed(); } } }
+                                if !root.use-grid: Field { label: "Tile size (mm)"; LineEdit { text <=> root.tile-mm; edited => { root.changed(); } } }
+                                StepHint { text: root.grid-info; }
+                                Label { text: "Style"; font-size: 13px; }
+                                Segmented {
+                                    options: ["Sharp", "Balanced", "Varied"];
+                                    current <=> root.style-index;
+                                    tint: Theme.amber;
+                                    changed(i) => {
+                                        root.style-changed(i);
+                                        root.changed();
+                                    }
+                                }
+                                StepHint { text: root.style-help; }
+                                LinkButton {
+                                    text: (root.size-advanced ? "▾" : "▸") + " Advanced (grid, reuse, colour correction…)";
+                                    clicked => { root.size-advanced = !root.size-advanced; }
+                                }
+                                if root.size-advanced: VerticalLayout {
+                                    spacing: 6px;
+                                    Switch { text: "Set columns × rows instead of tile size"; checked <=> root.use-grid; toggled => { root.changed(); } }
+                                    if root.use-grid: Field {
+                                        label: "Columns × rows";
+                                        SpinBox { minimum: 1; maximum: 2000; value <=> root.cols; edited => { root.changed(); } }
+                                        SpinBox { minimum: 1; maximum: 2000; value <=> root.rows; edited => { root.changed(); } }
+                                    }
+                                    CheckBox { text: "Use each photo as often as needed"; checked <=> root.unlimited-reuse; toggled => { root.changed(); } }
+                                    Field { label: "Max uses per photo"; SpinBox { enabled: !root.unlimited-reuse; minimum: 1; maximum: 10000; value <=> root.max-reuse; edited => { root.changed(); } } }
+                                    Field {
+                                        label: "Avoid nearby repeats";
+                                        Slider { minimum: 0; maximum: 30; value <=> root.repeat-penalty; changed => { root.changed(); } }
+                                        Text { text: round(root.repeat-penalty); min-width: 28px; color: Theme.fg; vertical-alignment: center; }
+                                    }
+                                    Field { label: "…within (tiles)"; SpinBox { minimum: 1; maximum: 20; value <=> root.repeat-radius; edited => { root.changed(); } } }
+                                    Field {
+                                        label: "Spread photo use";
+                                        Slider { enabled: root.style-index == 2; minimum: 0; maximum: 10; value <=> root.usage-penalty; changed => { root.changed(); } }
+                                        Text { text: round(root.usage-penalty * 10) / 10; min-width: 28px; color: Theme.fg; vertical-alignment: center; }
+                                    }
+                                    CheckBox { text: "Try off-centre crops"; checked <=> root.crop-offsets; toggled => { root.changed(); } }
+                                    Field { label: "Shuffle number"; SpinBox { minimum: 0; maximum: 1000000; value <=> root.seed; edited => { root.changed(); } } }
+                                    StepHint { text: "These two change how your photos look. Higher values make the picture easier to recognise."; }
+                                    Field {
+                                        label: "Colour correction";
+                                        Slider { minimum: 0; maximum: 0.5; value <=> root.color-correction; changed => { root.changed(); } }
+                                        Text { text: round(root.color-correction * 100) + "%"; min-width: 36px; color: Theme.fg; vertical-alignment: center; }
+                                    }
+                                    Field {
+                                        label: "Blend in picture";
+                                        Slider { minimum: 0; maximum: 0.5; value <=> root.motif-blend; changed => { root.changed(); } }
+                                        Text { text: round(root.motif-blend * 100) + "%"; min-width: 36px; color: Theme.fg; vertical-alignment: center; }
+                                    }
+                                }
+                            }
+                        }
+
+                        // ---------- 4 Export (violet)
+                        StepCard {
+                            open: root.open-step == 4;
+                            tint: Theme.violet;
+                            soft: Theme.violet-soft;
+                            StepHeader {
+                                number: "4";
+                                title: "Export";
+                                summary: root.has-preview ? (root.export-kind == 0 ? "Image file" : "Print pages") : "After preview";
+                                done: false;
+                                tint: Theme.violet;
+                                clicked => {
+                                    root.open-step = 4;
+                                    root.export-settings-changed();
+                                }
+                            }
+                            if root.open-step == 4: VerticalLayout {
+                                spacing: 8px;
+                                if !root.has-preview: StepHint { text: "Make a preview first. Export uses exactly the photos shown in the preview."; }
+                                Segmented {
+                                    options: ["Image file", "Print pages (PDF)"];
+                                    current <=> root.export-kind;
+                                    tint: Theme.violet;
+                                    changed => { root.export-settings-changed(); }
+                                }
+                                if root.export-kind == 0: VerticalLayout {
+                                    spacing: 6px;
+                                    Field { label: "Format"; ComboBox { model: ["BigTIFF (any size)", "PNG", "JPEG (up to 65,535 px)"]; current-index <=> root.raster-format-index; selected => { root.export-settings-changed(); } } }
+                                    Field { label: "Print quality (DPI)"; LineEdit { text <=> root.export-dpi; edited => { root.export-settings-changed(); } } }
+                                }
+                                if root.export-kind == 1: VerticalLayout {
+                                    spacing: 6px;
+                                    Field { label: "Paper"; ComboBox { model: ["A4", "A3", "A2", "A1", "A0", "Letter", "Legal", "Tabloid", "Custom"]; current-index <=> root.paper-index; selected => { root.export-settings-changed(); } } }
+                                    if root.paper-index == 8: Field {
+                                        label: "Paper W × H (mm)";
+                                        LineEdit { text <=> root.custom-w; edited => { root.export-settings-changed(); } }
+                                        LineEdit { text <=> root.custom-h; edited => { root.export-settings-changed(); } }
+                                    }
+                                    CheckBox { text: "Landscape"; checked <=> root.landscape; toggled => { root.export-settings-changed(); } }
+                                    LinkButton {
+                                        text: (root.export-advanced ? "▾" : "▸") + " Advanced (margins, overlap, DPI, marks)";
+                                        clicked => { root.export-advanced = !root.export-advanced; }
+                                    }
+                                    if root.export-advanced: VerticalLayout {
+                                        spacing: 6px;
+                                        Field { label: "Printer margin (mm)"; LineEdit { text <=> root.margin-mm; edited => { root.export-settings-changed(); } } }
+                                        Field { label: "Glue overlap (mm)"; LineEdit { text <=> root.overlap-mm; edited => { root.export-settings-changed(); } } }
+                                        Field { label: "Print quality (DPI)"; LineEdit { text <=> root.pdf-dpi; edited => { root.export-settings-changed(); } } }
+                                        CheckBox { text: "Crop marks, labels and ruler"; checked <=> root.marks; toggled => { root.export-settings-changed(); } }
+                                    }
+                                }
+                                if root.export-summary != "": Rectangle {
+                                    border-radius: 6px;
+                                    background: Theme.surface;
+                                    VerticalLayout {
+                                        padding: 8px;
+                                        Text { text: root.export-summary; font-size: 12px; color: Theme.fg; wrap: word-wrap; }
+                                    }
+                                }
+                                CheckBox { text: "Also save a list of the photos used (CSV)"; checked <=> root.save-manifest; }
+                                HorizontalLayout {
+                                    alignment: start;
+                                    ColorButton {
+                                        text: root.export-kind == 0 ? "Export image…" : "Export PDF…";
+                                        tint: Theme.violet;
+                                        enabled: !root.busy && root.has-preview;
+                                        clicked => { root.export(); }
+                                    }
+                                }
+                                if root.export-kind == 1: StepHint { text: "Print at 100% (Actual size) with Fit to page turned off, then check the 50 mm square."; }
+                                if root.export-report != "": StepHint { text: root.export-report; }
+                            }
+                        }
                     }
-                    VerticalBox {
-                        SectionTitle { text: "Before you export"; }
-                        Hint { text: "Exports always re-use the saved tile assignment, so changing DPI or paper never re-matches. Missing or changed source photos are reported and never silently replaced. Print the PDF at 100% (“Actual size”) with “Fit to page” turned off, and check the 50 mm calibration square."; }
+                }
+            }
+
+            // ===================== right side: preview, suggestions or info
+            VerticalLayout {
+                padding: 16px;
+                spacing: 10px;
+                horizontal-stretch: 1;
+
+                if root.notice != "": Rectangle {
+                    border-radius: 8px;
+                    background: Theme.coral-soft;
+                    border-width: 1px;
+                    border-color: Theme.coral;
+                    HorizontalLayout {
+                        padding: 10px;
+                        spacing: 10px;
+                        Text { text: root.notice; color: Theme.fg; font-size: 13px; wrap: word-wrap; horizontal-stretch: 1; }
+                        LinkButton { text: "Dismiss"; clicked => { root.notice = ""; } }
+                    }
+                }
+
+                if root.main-view == 0: VerticalLayout {
+                    spacing: 10px;
+                    HorizontalLayout {
+                        spacing: 12px;
+                        alignment: start;
+                        ColorButton {
+                            text: root.has-preview ? "Update preview" : "Make preview";
+                            tint: Theme.amber;
+                            enabled: !root.busy;
+                            clicked => { root.generate(); }
+                        }
+                        if root.has-preview && root.preview-stale: Text {
+                            text: "● Settings changed since this preview";
+                            color: Theme.coral;
+                            font-weight: 600;
+                            font-size: 13px;
+                            vertical-alignment: center;
+                        }
+                    }
+                    Rectangle {
+                        vertical-stretch: 1;
+                        background: Theme.surface;
+                        border-radius: 10px;
+                        border-width: 1px;
+                        border-color: Theme.line;
+                        if root.has-preview: Image {
+                            source: root.preview-image;
+                            image-fit: contain;
+                            width: parent.width - 16px;
+                            height: parent.height - 16px;
+                            opacity: root.preview-stale ? 0.7 : 1.0;
+                        }
+                        if !root.has-preview: VerticalLayout {
+                            alignment: center;
+                            spacing: 6px;
+                            Text { text: "Your mosaic will appear here"; font-size: 18px; font-weight: 600; color: Theme.fg; horizontal-alignment: center; }
+                            Text {
+                                text: root.photo-count == 0 ? "Start with step 1: add a folder of photos." : root.motif-path == "" ? "Next, choose a picture in step 2." : "Press Make preview.";
+                                color: Theme.muted;
+                                horizontal-alignment: center;
+                            }
+                        }
+                    }
+                    if root.has-preview: HorizontalLayout {
+                        spacing: 8px;
+                        alignment: start;
+                        Chip { text: root.chip-photos; dot: Theme.teal; }
+                        Chip { text: root.chip-distance; dot: Theme.amber; }
+                        Chip { text: root.chip-repeats; dot: Theme.coral; }
+                        LinkButton {
+                            text: "Details";
+                            vertical-alignment: center;
+                            clicked => {
+                                root.info-title = "Preview details";
+                                root.info-text = root.match-report;
+                                root.main-view = 2;
+                            }
+                        }
+                    }
+                }
+
+                if root.main-view == 1: VerticalLayout {
+                    spacing: 8px;
+                    HorizontalLayout {
+                        Text { text: "Help me choose a picture"; font-size: 18px; font-weight: 700; color: Theme.fg; horizontal-stretch: 1; }
+                        LinkButton { text: "Back to preview"; tint: Theme.coral; font-weight: 600; vertical-alignment: center; clicked => { root.main-view = 0; } }
+                    }
+                    Hint { text: "Ranks pictures by how well your photos can rebuild them at the current size and style: colour coverage, enough different photos, and detail lost at this tile size. It does not judge artistic quality."; }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        LineEdit { placeholder-text: "Folder of pictures to try (optional)"; text <=> root.suggest-folder; }
+                        Button { text: "Browse…"; clicked => { root.browse-suggest-folder(); } }
+                    }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Label { text: "Also try this many of my own photos:"; font-size: 13px; }
+                        SpinBox { width: 140px; minimum: 0; maximum: 500; value <=> root.suggest-from-library; }
+                        Rectangle { horizontal-stretch: 1; }
+                        ColorButton { text: "Find good pictures"; tint: Theme.coral; enabled: !root.busy; clicked => { root.suggest(); } }
+                    }
+                    Hint { text: root.suggest-report; }
+                    sugg-scroll := ScrollView {
+                        vertical-stretch: 1;
+                        VerticalLayout {
+                            width: sugg-scroll.visible-width;
+                            spacing: 6px;
+                            alignment: start;
+                            for s[i] in root.suggestions: Rectangle {
+                                height: 110px;
+                                background: Theme.surface;
+                                border-radius: 8px;
+                                border-width: 1px;
+                                border-color: Theme.line;
+                                HorizontalLayout {
+                                    padding: 6px;
+                                    spacing: 10px;
+                                    Image { source: s.preview; width: 130px; image-fit: contain; }
+                                    VerticalLayout {
+                                        Text { text: s.score + "  " + s.label; font-weight: 600; color: Theme.fg; overflow: elide; }
+                                        Hint { text: s.notes; vertical-stretch: 1; }
+                                    }
+                                    VerticalLayout {
+                                        alignment: center;
+                                        ColorButton { text: "Use"; tint: Theme.coral; enabled: s.path != ""; clicked => { root.use-suggestion(i); } }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if root.main-view == 2: VerticalLayout {
+                    spacing: 8px;
+                    HorizontalLayout {
+                        Text { text: root.info-title; font-size: 18px; font-weight: 700; color: Theme.fg; horizontal-stretch: 1; }
+                        LinkButton { text: "Back to preview"; font-weight: 600; vertical-alignment: center; clicked => { root.main-view = 0; } }
+                    }
+                    Rectangle {
+                        vertical-stretch: 1;
+                        background: Theme.surface;
+                        border-radius: 8px;
                         ScrollView {
-                            vertical-stretch: 1;
-                            Text { text: root.export-report; wrap: word-wrap; width: parent.width - 16px; font-family: "monospace"; font-size: 12px; }
+                            Text { text: root.info-text; wrap: word-wrap; color: Theme.fg; font-size: 12px; width: parent.width - 24px; x: 12px; y: 8px; }
                         }
                     }
                 }
             }
         }
 
-        // ----- status bar
-        HorizontalBox {
-            padding: 0;
-            height: 36px;
-            ProgressIndicator {
-                width: 260px;
-                progress: root.progress-known ? root.progress : 0;
-                indeterminate: root.busy && !root.progress-known;
+        // ===================== status bar
+        Rectangle {
+            height: 40px;
+            background: Theme.surface;
+            Rectangle { height: 1px; y: 0; background: Theme.line; }
+            HorizontalLayout {
+                padding-left: 16px;
+                padding-right: 12px;
+                spacing: 12px;
+                Rectangle {
+                    width: 220px;
+                    height: 6px;
+                    y: 17px;
+                    border-radius: 3px;
+                    background: Theme.line;
+                    clip: true;
+                    Rectangle {
+                        x: 0;
+                        height: parent.height;
+                        width: root.progress-known ? parent.width * root.progress : (root.busy ? parent.width * 0.35 : 0);
+                        background: @linear-gradient(90deg, Theme.teal 0%, Theme.violet 100%);
+                    }
+                }
+                Text { text: root.status; color: Theme.muted; font-size: 12px; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; }
+                if root.busy: Button { text: "Cancel"; clicked => { root.cancel(); } }
+                Text { text: "Made with Slint"; color: Theme.muted; font-size: 11px; vertical-alignment: center; }
             }
-            Text { text: root.status; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; }
-            Button { text: "Cancel"; enabled: root.busy; clicked => { root.cancel(); } }
-            Hint { text: "Made with Slint"; vertical-alignment: center; }
         }
     }
 }
