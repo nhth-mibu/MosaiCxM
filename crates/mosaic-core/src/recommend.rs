@@ -51,9 +51,7 @@ impl MotifCandidate {
         Self { label: p.display().to_string(), source: MotifSource::File(p.to_path_buf()), hash: None }
     }
     pub fn from_folder(dir: &Path) -> Result<Vec<Self>> {
-        let mut v: Vec<Self> = walkdir::WalkDir::new(dir)
-            .max_depth(3)
-            .into_iter()
+        let mut v: Vec<Self> = crate::indexer::walk_images(dir)
             .filter_map(|e| e.ok())
             .filter(|e| e.file_type().is_file())
             .filter(|e| {
