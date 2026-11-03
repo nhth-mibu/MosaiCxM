@@ -394,6 +394,7 @@ export component AppWindow inherits Window {
             }
             Text { text: root.status; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; }
             Button { text: "Cancel"; enabled: root.busy; clicked => { root.cancel(); } }
+            Hint { text: "Made with Slint"; vertical-alignment: center; }
         }
     }
 }
