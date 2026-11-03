@@ -209,16 +209,43 @@ fn upsert(cat: &Catalog, w: &WorkItem, hash: Option<&Hash>, status: i64, err: Op
     Ok(())
 }
 
+/// Folder names that hold system or NAS housekeeping files, never photos
+/// (thumbnails, trash, snapshots). Dot-prefixed names are skipped as well.
+pub const SKIPPED_FOLDERS: &[&str] = &[
+    "@eaDir", "#recycle", "#snapshot", "$RECYCLE.BIN", "System Volume Information", "lost+found",
+];
+
+/// Whether a file or folder below a source root is skipped by the scan:
+/// hidden (dot-prefixed, which also covers macOS `._` resource files,
+/// `.Trashes` and `.Spotlight-V100`) or a known system folder.
+pub fn is_skipped_entry(name: &str, is_dir: bool) -> bool {
+    name.starts_with('.') || (is_dir && SKIPPED_FOLDERS.iter().any(|s| s.eq_ignore_ascii_case(name)))
+}
+
+/// Recursive scan of a source root at any depth. Symlinks are followed;
+/// loops are reported by walkdir as errors with a loop ancestor.
+pub fn walk_images(root: &Path) -> impl Iterator<Item = walkdir::Result<walkdir::DirEntry>> {
+    walkdir::WalkDir::new(root).follow_links(true).into_iter().filter_entry(|e| {
+        e.depth() == 0 || !e.file_name().to_str().map(|n| is_skipped_entry(n, e.file_type().is_dir())).unwrap_or(false)
+    })
+}
+
 fn walk_root(root: &Path, rep: &mut IndexReport) -> (HashMap<String, (i64, i64)>, bool) {
     let mut seen = HashMap::new();
     let mut ok = true;
-    let it = walkdir::WalkDir::new(root).follow_links(false).into_iter().filter_entry(|e| {
-        e.depth() == 0 || !e.file_name().to_str().map(|s| s.starts_with('.')).unwrap_or(false)
-    });
-    for entry in it {
+    for entry in walk_images(root) {
         let entry = match entry {
             Ok(e) => e,
+            Err(e) if e.loop_ancestor().is_some() => {
+                // A symlink pointing back up the tree: report it and carry on.
+                // Its contents are already being scanned through the real path.
+                let p = e.path().map(Path::to_path_buf).unwrap_or_else(|| root.to_path_buf());
+                rep.skipped.push((p, "symlink loop, folder not scanned twice".into()));
+                continue;
+            }
             Err(e) => {
+                // Unreadable folder or broken symlink: the scan is incomplete, so
+                // files under it are kept in the index rather than marked removed.
                 ok = false;
                 rep.walk_errors.push(e.to_string());
                 continue;
