@@ -21,6 +21,7 @@ use mosaic_core::pool::Pool;
 use mosaic_core::project::{check_sources, libraries_refs, load_target, output_stats, shutter_label, write_manifest, write_output_stats, Counted, OutputStats, Range, Project};
 use mosaic_core::recommend::{recommend, MotifCandidate, MotifSource, RecommendOptions};
 use mosaic_core::render::{render_preview, FileSource};
+use mosaic_core::shape::{Outline, Shape};
 use mosaic_core::units::format_bytes;
 use slint::{ComponentHandle, Image, ModelRc, Rgb8Pixel, SharedPixelBuffer, SharedString, VecModel};
 use std::collections::HashSet;
@@ -231,6 +232,46 @@ fn read_settings(ui: &AppWindow) -> Result<(GridSpec, MatchSettings)> {
     Ok((grid, s))
 }
 
+const SHAPES: [Shape; 5] = [Shape::Ellipse, Shape::Heart, Shape::Hexagon, Shape::Diamond, Shape::Star];
+const BACKGROUNDS: [[u8; 3]; 3] = [[255, 255, 255], [0, 0, 0], [220, 220, 220]];
+
+fn read_outline(ui: &AppWindow) -> Result<Option<Outline>> {
+    let i = ui.get_shape_index();
+    let shape = match i {
+        1..=5 => SHAPES[i as usize - 1].clone(),
+        6 => {
+            let f = ui.get_shape_file();
+            if f.is_empty() {
+                bail!("choose a shape file, or pick another shape");
+            }
+            Shape::from_file(Path::new(f.as_str()), ui.get_shape_invert())?
+        }
+        _ => return Ok(None),
+    };
+    let bg = BACKGROUNDS[ui.get_shape_background_index().clamp(0, 2) as usize];
+    let o = Outline { shape, background: bg, threshold: ui.get_shape_threshold().clamp(0.05, 1.0) };
+    o.validate()?;
+    Ok(Some(o))
+}
+
+fn show_outline(ui: &AppWindow, o: Option<&Outline>) {
+    let Some(o) = o else {
+        ui.set_shape_index(0);
+        return;
+    };
+    match &o.shape {
+        Shape::File { path, invert, .. } => {
+            ui.set_shape_index(6);
+            ui.set_shape_file(path.display().to_string().into());
+            ui.set_shape_file_name(file_name(path).into());
+            ui.set_shape_invert(*invert);
+        }
+        s => ui.set_shape_index(SHAPES.iter().position(|x| x == s).map(|p| p as i32 + 1).unwrap_or(0)),
+    }
+    ui.set_shape_background_index(BACKGROUNDS.iter().position(|b| *b == o.background).unwrap_or(0) as i32);
+    ui.set_shape_threshold(o.threshold);
+}
+
 /// Applies a style preset: method defaults plus the preset's reuse limit.
 fn apply_style(ui: &AppWindow, i: i32) {
     let (m, reuse, help) = STYLES[i.clamp(0, 2) as usize];
@@ -257,9 +298,18 @@ fn update_grid_info(ui: &AppWindow, st: &State) {
             let photos: u64 = st.libs.iter().filter(|l| !st.excluded.contains(&l.id)).map(|l| l.distinct_photos).sum();
             let (tw, th) = g.tile_mm();
             let mut t = format!("{} × {} = {} tiles of {:.0} × {:.0} mm. Looks best from about {:.0} m away.", g.cols, g.rows, thousands(g.tiles() as u64), tw, th, viewing_distance_m(tw.max(th)));
+            let mut placed = g.tiles() as u64;
+            match read_outline(ui).and_then(|o| o.map(|o| o.active_tiles(&g)).transpose()) {
+                Ok(Some(a)) => {
+                    placed = a.iter().filter(|&&x| x).count() as u64;
+                    t += &format!(" {} tiles are inside the shape.", thousands(placed));
+                }
+                Ok(None) => {}
+                Err(e) => t += &format!(" Shape: {e:#}."),
+            }
             if photos > 0 {
                 if let Some(m) = s.max_reuse {
-                    let need = (g.tiles() as u64).div_ceil(m as u64);
+                    let need = placed.div_ceil(m as u64);
                     if photos < need {
                         t += &format!(" Not enough photos: you need at least {} for this size, or use bigger tiles.", thousands(need));
                     }
@@ -361,10 +411,11 @@ fn update_export_summary(ui: &AppWindow, st: &State) {
     } else {
         print_settings(ui).and_then(|ps| plan_pdf(&p, &ps)).map(|pl| {
             format!(
-                "{} pages ({} across × {} down) on {} {}, plus 1 assembly page\nFile size about {}",
-                pl.layout.pages.len(),
+                "{} pages ({} across × {} down{}) on {} {}, plus 1 assembly page\nFile size about {}",
+                pl.printed_pages(),
                 pl.layout.cols,
                 pl.layout.rows,
+                if pl.blank_pages() > 0 { format!(", {} blank skipped", pl.blank_pages()) } else { String::new() },
                 pl.print.paper_name,
                 if pl.print.landscape { "landscape" } else { "portrait" },
                 format_bytes(pl.est_output_bytes)
@@ -396,6 +447,7 @@ fn show_project(ui: &AppWindow, s: &mut State, p: Project, buf: SharedPixelBuffe
         ui.set_seed(p.settings.seed as i32);
         ui.set_color_correction(p.settings.color_correction);
         ui.set_motif_blend(p.settings.motif_blend);
+        show_outline(ui, p.outline.as_ref());
         let used: HashSet<i64> = p.libraries.iter().map(|l| l.id).collect();
         s.excluded = s.libs.iter().map(|l| l.id).filter(|id| !used.contains(id)).collect();
         let _ = refresh_libraries(ui, s);
@@ -707,6 +759,21 @@ fn main() -> Result<()> {
         });
     }
     {
+        let (w, s) = (ui.as_weak(), st.clone());
+        ui.on_browse_shape(move || {
+            let ui = w.unwrap();
+            if let Some(p) = rfd::FileDialog::new().set_title("Choose a shape (SVG or picture)").add_filter("Shapes", &["svg", "png", "jpg", "jpeg", "webp"]).pick_file() {
+                ui.set_shape_file(p.display().to_string().into());
+                ui.set_shape_file_name(file_name(&p).into());
+                ui.set_shape_index(6);
+                mark_stale(&ui);
+            } else if ui.get_shape_file().is_empty() {
+                ui.set_shape_index(0);
+            }
+            update_grid_info(&ui, &s.lock().unwrap());
+        });
+    }
+    {
         let w = ui.as_weak();
         ui.on_browse_suggest_folder(move || {
             if let Some(p) = rfd::FileDialog::new().set_title("Folder of pictures to try").pick_folder() {
@@ -808,6 +875,10 @@ fn main() -> Result<()> {
                 (Ok(l), Ok(x)) => (l, x),
                 (Err(e), _) | (_, Err(e)) => return report_error(&ui, e),
             };
+            let outline = match read_outline(&ui) {
+                Ok(o) => o,
+                Err(e) => return report_error(&ui, e),
+            };
             let motif = PathBuf::from(ui.get_motif_path().to_string());
             if motif.as_os_str().is_empty() {
                 ui.set_open_step(2);
@@ -818,7 +889,7 @@ fn main() -> Result<()> {
                 let cat = Catalog::open(&dd)?;
                 let pool = load_pool(&s2, &cat, &libs, settings.merge_near_duplicates)?;
                 let (target, mref) = load_target(&motif, &grid)?;
-                let p = Project::create(&pool, libraries_refs(&cat, &libs)?, &target, mref, grid, settings, job).map_err(anyhow::Error::from)?;
+                let p = Project::create_with_outline(&pool, libraries_refs(&cat, &libs)?, &target, mref, grid, settings, outline, job).map_err(anyhow::Error::from)?;
                 let tile_px = (2400 / grid.cols.max(grid.rows)).clamp(4, 48);
                 let buf = to_image(&render_preview(&cat, &p, tile_px, job)?);
                 Ok(Box::new(move |ui: &AppWindow, s: &mut State| {
@@ -920,9 +991,9 @@ fn main() -> Result<()> {
                     let src = resolve(&cat, &p, job)?;
                     let overview = render_preview(&cat, &p, (1600 / p.grid.cols.max(p.grid.rows)).clamp(2, 32), job)?;
                     let rep = export_pdf(&p, &src, Some(&overview), &plan, &out, job)?;
-                    let details = serde_json::json!({ "paper": plan.print.paper_name, "landscape": plan.print.landscape, "pages": plan.layout.pages.len(), "overlap_mm": plan.print.overlap_mm, "dpi": plan.print.dpi, "bytes": rep.bytes });
+                    let details = serde_json::json!({ "paper": plan.print.paper_name, "landscape": plan.print.landscape, "pages": plan.printed_pages(), "overlap_mm": plan.print.overlap_mm, "dpi": plan.print.dpi, "bytes": rep.bytes });
                     let (_, stats) = write_output_stats(&cat, &p, &out, "tiled-pdf", details)?;
-                    let mut msg = format!("Saved {} ({}, {} pages) in {:.0} s.", rep.path, format_bytes(rep.bytes), plan.layout.pages.len(), rep.elapsed_ms as f64 / 1000.0);
+                    let mut msg = format!("Saved {} ({}, {} pages) in {:.0} s.", rep.path, format_bytes(rep.bytes), plan.printed_pages(), rep.elapsed_ms as f64 / 1000.0);
                     if manifest {
                         msg += &save_manifest(&cat, &p, &out)?;
                     }

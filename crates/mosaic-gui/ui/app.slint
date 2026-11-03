@@ -333,6 +333,12 @@ export component AppWindow inherits Window {
     in-out property <int> seed: 1;
     in-out property <float> color-correction: 0;
     in-out property <float> motif-blend: 0;
+    in-out property <int> shape-index: 0; // 0 rectangle, 1-5 built-in, 6 from file
+    in-out property <string> shape-file;
+    in-out property <string> shape-file-name;
+    in-out property <bool> shape-invert: false;
+    in-out property <int> shape-background-index: 0; // white, black, grey
+    in-out property <float> shape-threshold: 0.5;
 
     // ----- preview
     in-out property <image> preview-image;
@@ -382,6 +388,7 @@ export component AppWindow inherits Window {
     callback show-skipped();
 
     callback browse-motif();
+    callback browse-shape();
     callback browse-suggest-folder();
     callback suggest();
     callback use-suggestion(int);
@@ -591,6 +598,28 @@ export component AppWindow inherits Window {
                                 Field { label: "Width (mm)"; LineEdit { text <=> root.width-mm; edited => { root.changed(); } } }
                                 Field { label: "Height (mm)"; LineEdit { text <=> root.height-mm; edited => { root.changed(); } } }
                                 if !root.use-grid: Field { label: "Tile size (mm)"; LineEdit { text <=> root.tile-mm; edited => { root.changed(); } } }
+                                Field {
+                                    label: "Shape";
+                                    ComboBox {
+                                        model: ["Rectangle", "Ellipse", "Heart", "Hexagon", "Diamond", "Star", "From file (SVG, PNG, JPG…)"];
+                                        current-index <=> root.shape-index;
+                                        selected => {
+                                            if root.shape-index == 6 && root.shape-file == "" { root.browse-shape(); }
+                                            root.changed();
+                                        }
+                                    }
+                                }
+                                if root.shape-index == 6: Field {
+                                    label: "Shape file";
+                                    Text { text: root.shape-file-name == "" ? "None chosen" : root.shape-file-name; color: Theme.fg; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; }
+                                    Button { text: "Choose…"; clicked => { root.browse-shape(); } }
+                                }
+                                if root.shape-index == 6: CheckBox { text: "Swap inside and outside"; checked <=> root.shape-invert; toggled => { root.changed(); } }
+                                if root.shape-index > 0: Field {
+                                    label: "Outside the shape";
+                                    ComboBox { model: ["White", "Black", "Light grey"]; current-index <=> root.shape-background-index; selected => { root.changed(); } }
+                                }
+                                if root.shape-index == 6: StepHint { text: "SVG: the drawn parts are the shape. PNG with transparency: the solid parts. Other pictures: the dark parts."; }
                                 StepHint { text: root.grid-info; }
                                 Label { text: "Style"; font-size: 13px; }
                                 Segmented {
@@ -629,6 +658,11 @@ export component AppWindow inherits Window {
                                         Text { text: round(root.usage-penalty * 10) / 10; min-width: 28px; color: Theme.fg; vertical-alignment: center; }
                                     }
                                     CheckBox { text: "Try off-centre crops"; checked <=> root.crop-offsets; toggled => { root.changed(); } }
+                                    if root.shape-index > 0: Field {
+                                        label: "Edge tiles";
+                                        Slider { minimum: 0.05; maximum: 1; value <=> root.shape-threshold; changed => { root.changed(); } }
+                                        Text { text: round(root.shape-threshold * 100) + "% in"; min-width: 48px; color: Theme.fg; vertical-alignment: center; }
+                                    }
                                     Field { label: "Shuffle number"; SpinBox { minimum: 0; maximum: 1000000; value <=> root.seed; edited => { root.changed(); } } }
                                     StepHint { text: "These two change how your photos look. Higher values make the picture easier to recognise."; }
                                     Field {

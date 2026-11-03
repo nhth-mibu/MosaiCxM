@@ -29,12 +29,20 @@ pub struct PdfPlan {
     pub spec: RasterSpec,
     pub print: PrintSettings,
     pub max_page_px: (u64, u64),
+    /// Per layout page: true when it lies fully outside the mosaic outline (not printed).
+    pub blank: Vec<bool>,
     pub est_peak_memory: u64,
     pub est_output_bytes: u64,
     pub notes: Vec<String>,
 }
 
 impl PdfPlan {
+    pub fn blank_pages(&self) -> usize {
+        self.blank.iter().filter(|&&b| b).count()
+    }
+    pub fn printed_pages(&self) -> usize {
+        self.layout.pages.len() - self.blank_pages()
+    }
     pub fn summary(&self) -> String {
         let l = &self.layout;
         let (sw, sh) = self.print.sheet_mm();
@@ -42,7 +50,7 @@ impl PdfPlan {
             "Artwork: {:.0} × {:.0} mm, printed at {} DPI ({} × {} px overall)\n\
              Paper: {} {} ({:.1} × {:.1} mm), margins {:?} mm, overlap {} mm, marks {}\n\
              Usable artwork per page: {:.1} × {:.1} mm\n\
-             Print pages: {} ({} columns × {} rows) + 1 assembly overview page\n\
+             Print pages: {} ({} columns × {} rows{}) + 1 assembly overview page\n\
              Largest page image: {} × {} px\n\
              Estimated peak memory: {}, estimated PDF size: {}\n",
             l.art_w,
@@ -59,9 +67,10 @@ impl PdfPlan {
             if self.print.marks { "on" } else { "off" },
             l.usable_w,
             l.usable_h,
-            l.pages.len(),
+            self.printed_pages(),
             l.cols,
             l.rows,
+            if self.blank_pages() > 0 { format!("; {} blank pages outside the shape are skipped", self.blank_pages()) } else { String::new() },
             self.max_page_px.0,
             self.max_page_px.1,
             format_bytes(self.est_peak_memory),
@@ -78,6 +87,7 @@ pub fn plan_pdf(project: &Project, print: &PrintSettings) -> Result<PdfPlan> {
     let g = &project.grid;
     let layout = compute_layout(g.width_mm, g.height_mm, print)?;
     let spec = RasterSpec::new(g.width_mm, g.height_mm, print.dpi)?;
+    let blank: Vec<bool> = layout.pages.iter().map(|p| !project.window_has_tiles(p.x0, p.x1, p.y0, p.y1)).collect();
     let mut max_page_px = (0, 0);
     for p in &layout.pages {
         let w = spec.x_px(p.x1) - spec.x_px(p.x0);
@@ -89,14 +99,14 @@ pub fn plan_pdf(project: &Project, print: &PrintSettings) -> Result<PdfPlan> {
     }
     let cache = cache_budget_for(&spec, project);
     let est_peak_memory = cache + max_page_px.0 * 256 * 3 * 2 + rayon::current_num_threads() as u64 * (16 << 20) + (64 << 20);
-    let page_px: u64 = layout.pages.iter().map(|p| (spec.x_px(p.x1) - spec.x_px(p.x0)) * (spec.y_px(p.y1) - spec.y_px(p.y0))).sum();
+    let page_px: u64 = layout.pages.iter().zip(&blank).filter(|(_, b)| !**b).map(|(p, _)| p).map(|p| (spec.x_px(p.x1) - spec.x_px(p.x0)) * (spec.y_px(p.y1) - spec.y_px(p.y0))).sum();
     let est_output_bytes = page_px * 3 / 8 + 2_000_000;
     let notes = vec![
         "Print at 100% / \"Actual size\". Disable \"Fit to page\", \"Shrink oversized pages\" and borderless enlargement.".into(),
         "Margins must be at least your printer's unprintable border, or content will be clipped.".into(),
         "Colour: sRGB images, no printer ICC profile or CMYK conversion.".into(),
     ];
-    Ok(PdfPlan { layout, spec, print: print.clone(), max_page_px, est_peak_memory, est_output_bytes, notes })
+    Ok(PdfPlan { layout, spec, print: print.clone(), max_page_px, blank, est_peak_memory, est_output_bytes, notes })
 }
 
 struct PdfOut<W: Write + Seek> {
@@ -230,8 +240,10 @@ pub fn export_pdf(project: &Project, source: &dyn TileSource, overview: Option<&
         c.text(left, y, 14.0, true, "Photo mosaic - assembly map");
         y += 6.0;
         c.text(left, y, 8.0, false, &format!(
-            "Final size {:.0} × {:.0} mm. {} pages ({} columns × {} rows) on {} {}. Overlap {} mm. {} DPI.",
-            layout.art_w, layout.art_h, layout.pages.len(), layout.cols, layout.rows, print.paper_name,
+            "Final size {:.0} × {:.0} mm. {} pages ({} columns × {} rows{}) on {} {}. Overlap {} mm. {} DPI.",
+            layout.art_w, layout.art_h, plan.printed_pages(), layout.cols, layout.rows,
+            if plan.blank_pages() > 0 { "; grey pages are blank and not included".to_string() } else { String::new() },
+            print.paper_name,
             if print.landscape { "landscape" } else { "portrait" }, print.overlap_mm, print.dpi
         ));
         y += 4.0;
@@ -277,8 +289,12 @@ pub fn export_pdf(project: &Project, source: &dyn TileSource, overview: Option<&
                 c.image("Ov", left, y, mw, mh);
             }
             c.s += "0.85 0 0 RG\n";
-            for p in &layout.pages {
+            for (pi, p) in layout.pages.iter().enumerate() {
                 let (px, py) = (left + p.x0 * s, y + p.y0 * s);
+                if plan.blank.get(pi).copied().unwrap_or(false) {
+                    let fill = format!("0.9 g\n{:.3} {:.3} {:.3} {:.3} re f\n", c.x(px), c.y(py + (p.y1 - p.y0) * s), (p.x1 - p.x0) * s * PT_PER_MM, (p.y1 - p.y0) * s * PT_PER_MM);
+                    c.s += &fill;
+                }
                 c.rect(px, py, (p.x1 - p.x0) * s, (p.y1 - p.y0) * s, 0.5);
                 c.s += "0 0 0 rg\n";
                 c.text(px + 1.0, py + 3.5, (2.8 * s * layout.usable_w / 40.0).clamp(4.0, 9.0), true, &p.label);
@@ -300,6 +316,9 @@ pub fn export_pdf(project: &Project, source: &dyn TileSource, overview: Option<&
     let mmy = spec.mm_per_px_y();
     let total = layout.pages.len() as u64;
     for (i, p) in layout.pages.iter().enumerate() {
+        if plan.blank.get(i).copied().unwrap_or(false) {
+            continue;
+        }
         job.check()?;
         job.report("writing PDF pages", i as u64, total);
         let (px0, px1, py0, py1) = (spec.x_px(p.x0), spec.x_px(p.x1), spec.y_px(p.y0), spec.y_px(p.y1));
