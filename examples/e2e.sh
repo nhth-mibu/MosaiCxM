@@ -12,10 +12,10 @@ export MOSAIC_DATA_DIR="$D/catalog"
 
 # 1. Sample source photos (synthetic; use your own folders instead).
 [ -d "$D/photos" ] || "$M" bench gen-photos "$D/photos" --count "$N"
-# Target motif: a simple landscape drawn with ImageMagick-free Rust tooling is
-# not available, so reuse one generated photo scaled up as a fallback motif
-# unless you pass MOTIF=/path/to/image.jpg.
-MOTIF=${MOTIF:-$(ls "$D"/photos/000/*.jpg | head -1)}
+# Target motif: pass MOTIF=/path/to/image.jpg. Without one, the first
+# generated photo is used so the script runs on its own.
+FIRST=("$D"/photos/000/*.jpg)
+MOTIF=${MOTIF:-${FIRST[0]}}
 
 # 2. Library: create, add folder, index (incremental on re-runs).
 "$M" library create demo 2>/dev/null || true

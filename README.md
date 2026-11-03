@@ -148,7 +148,7 @@ Before an export, every source is resolved to an existing, unchanged file. A cha
 | ICC | `moxcms` | Pure Rust CMS (also used by `image`); avoids a C `lcms2` build. |
 | Database | `rusqlite` (bundled SQLite) | One local file, transactional, no server. |
 | Hash | `blake3` | Fast full-content hashing for change and duplicate detection. |
-| Nearest neighbours | `kiddo` k-d tree | Measured 176–758× faster than exhaustive search at 100k photos with the same best candidate (see benchmarks). |
+| Nearest neighbours | `kiddo` k-d tree | Measured roughly 150–750× faster than exhaustive search at 100k photos with the same best candidate (see benchmarks). |
 | Parallelism | `rayon`, one global pool | Decode, match and render share it, so they don't oversubscribe the CPU. |
 | Encoders | `png`, `jpeg-encoder`, `flate2`; in-tree BigTIFF and PDF writers | Streaming with bounded memory. `pdf-writer` keeps the whole document in memory. |
 | UI | Slint (Fluent style), `rfd` file dialogs | Polished, Rust-native, no web stack. Slint's royalty-free licence requires attribution in the app or docs. |
