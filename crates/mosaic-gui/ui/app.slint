@@ -471,7 +471,6 @@ export component AppWindow inherits Window {
                                     ColorButton {
                                         text: root.motif-path == "" ? "Choose picture…" : "Change picture…";
                                         tint: Theme.coral;
-                                        enabled: !root.busy;
                                         clicked => { root.browse-motif(); }
                                     }
                                     LinkButton {
