@@ -3013,6 +3013,7 @@ dependencies = [
  "moxcms 0.9.1",
  "png",
  "rayon",
+ "resvg",
  "rusqlite",
  "serde",
  "serde_json",

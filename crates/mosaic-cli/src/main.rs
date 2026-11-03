@@ -13,6 +13,7 @@ use mosaic_core::pdf::{export_pdf, plan_pdf};
 use mosaic_core::pool::Pool;
 use mosaic_core::project::{check_sources, libraries_refs, load_target, write_manifest, write_output_stats, OutputStats, Project};
 use mosaic_core::render::{render_preview, FileSource};
+use mosaic_core::shape::{Outline, Shape};
 use mosaic_core::units::format_bytes;
 use mosaic_core::Catalog;
 use std::io::Write;
@@ -146,6 +147,29 @@ struct CreateArgs {
     /// Also write a preview PNG.
     #[arg(long)]
     preview: Option<PathBuf>,
+    /// Outline of the mosaic: ellipse, heart, hexagon, diamond, star, a shape
+    /// file (SVG; PNG with transparency; or any image where dark = inside),
+    /// or "motif" to use the motif's own transparency.
+    #[arg(long)]
+    shape: Option<String>,
+    /// Swap inside and outside of a shape file.
+    #[arg(long, requires = "shape")]
+    shape_invert: bool,
+    /// Share of a tile's area that must lie inside the shape (0.05–1).
+    #[arg(long, default_value_t = 0.5, requires = "shape")]
+    shape_threshold: f32,
+    /// Colour outside the shape, as #rrggbb.
+    #[arg(long, default_value = "#ffffff", requires = "shape")]
+    background: String,
+}
+
+fn parse_hex_color(s: &str) -> Result<[u8; 3]> {
+    let h = s.trim().trim_start_matches('#');
+    if h.len() != 6 || !h.chars().all(|c| c.is_ascii_hexdigit()) {
+        bail!("colour must look like #rrggbb, got '{s}'");
+    }
+    let v = |i: usize| u8::from_str_radix(&h[i..i + 2], 16).unwrap();
+    Ok([v(0), v(2), v(4)])
 }
 
 #[derive(Args)]
@@ -326,7 +350,23 @@ fn run(cli: Cli, cancel: Arc<AtomicBool>) -> Result<()> {
             let pool = Pool::load(&cat, &libs, settings.merge_near_duplicates)?;
             let load_ms = t.elapsed().as_millis();
             let (target, motif) = load_target(&a.motif, &grid)?;
-            let project = Project::create(&pool, libraries_refs(&cat, &libs)?, &target, motif, grid, settings, &job).map_err(anyhow::Error::from)?;
+            let outline = match &a.shape {
+                Some(name) => {
+                    let shape = if name.eq_ignore_ascii_case("motif") {
+                        // The motif's own transparency, aligned with the picture.
+                        let mut s = Shape::from_file(&a.motif, a.shape_invert)?;
+                        if let Shape::File { cover, .. } = &mut s {
+                            *cover = true;
+                        }
+                        s
+                    } else { Shape::parse(name, a.shape_invert)? };
+                    let o = Outline { shape, background: parse_hex_color(&a.background)?, threshold: a.shape_threshold };
+                    o.validate()?;
+                    Some(o)
+                }
+                None => None,
+            };
+            let project = Project::create_with_outline(&pool, libraries_refs(&cat, &libs)?, &target, motif, grid, settings, outline, &job).map_err(anyhow::Error::from)?;
             eprintln!();
             project.save(&a.out)?;
             let s = &project.stats;
@@ -335,6 +375,9 @@ fn run(cli: Cli, cancel: Arc<AtomicBool>) -> Result<()> {
                 "Grid {}×{} = {} tiles, each {:.1}×{:.1} mm. Method: {}.",
                 grid.cols, grid.rows, grid.tiles(), grid.tile_mm().0, grid.tile_mm().1, project.settings.method.title()
             );
+            if let Some(o) = &project.outline {
+                println!("Shape: {} – {} of {} tiles are inside and get a photo.", o.shape.label(), project.placed_tiles(), grid.tiles());
+            }
             println!(
                 "Pool: {} distinct photos ({} groups after duplicate merging), {} candidates (crops).",
                 s.pool_photos, s.pool_groups, s.candidates
@@ -444,9 +487,9 @@ fn run(cli: Cli, cancel: Arc<AtomicBool>) -> Result<()> {
             let overview = render_preview(&cat, &p, overview_tile_px(&p), &job)?;
             let rep = export_pdf(&p, &src, Some(&overview), &plan, &a.out, &job)?;
             eprintln!();
-            println!("Exported {} ({}, {} pages) in {:.1} s.", rep.path, format_bytes(rep.bytes), plan.layout.pages.len() + 1, rep.elapsed_ms as f64 / 1000.0);
+            println!("Exported {} ({}, {} pages) in {:.1} s.", rep.path, format_bytes(rep.bytes), plan.printed_pages() + 1, rep.elapsed_ms as f64 / 1000.0);
             let (sw, sh) = plan.print.sheet_mm();
-            let details = serde_json::json!({ "paper": plan.print.paper_name, "sheet_mm": [sw, sh], "landscape": plan.print.landscape, "pages": plan.layout.pages.len(), "page_grid": [plan.layout.cols, plan.layout.rows], "overlap_mm": plan.print.overlap_mm, "margins_mm": plan.print.margins_mm, "dpi": plan.print.dpi, "bytes": rep.bytes });
+            let details = serde_json::json!({ "paper": plan.print.paper_name, "sheet_mm": [sw, sh], "landscape": plan.print.landscape, "pages": plan.printed_pages(), "blank_pages_skipped": plan.blank_pages(), "page_grid": [plan.layout.cols, plan.layout.rows], "overlap_mm": plan.print.overlap_mm, "margins_mm": plan.print.margins_mm, "dpi": plan.print.dpi, "bytes": rep.bytes });
             print_stats(write_output_stats(&cat, &p, &a.out, "tiled-pdf", details)?);
         }
         Cmd::Manifest { project, out } => {

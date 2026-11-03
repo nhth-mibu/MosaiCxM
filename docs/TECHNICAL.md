@@ -61,6 +61,14 @@ mosaic create --motif portrait.jpg --libs travel,family --width-mm 1000 --height
   --tile-mm 15 --method variety --max-reuse 3 --repeat-penalty 8 --seed 42 \
   -o portrait.json --preview preview.png
 
+# Non-rectangular outline: built-in shape, a shape file, or the motif's own transparency.
+#   SVG: drawn parts are inside. PNG/WebP with transparency: opaque parts.
+#   Other images: dark parts. The shape is centred and fitted inside the artwork
+#   (--shape motif covers the artwork like the motif, so it lines up with it).
+mosaic create --motif portrait.jpg --libs travel --width-mm 1000 --height-mm 1000 --tile-mm 15 \
+  --shape heart --background '#ffffff' --shape-threshold 0.5 -o heart.json
+mosaic create ... --shape logo.svg [--shape-invert] -o logo.json
+
 mosaic preview portrait.json -o preview.png --tile-px 32
 mosaic check portrait.json              # missing/changed source files, before export
 mosaic export portrait.json -o portrait.tif --dpi 300 --dry-run   # estimates only
@@ -130,6 +138,8 @@ The notes explain the result in plain words, for example "strong colour coverage
 
 A project stores the motif reference (path, content hash, crop), the selected libraries, the grid and physical size, all matching settings and the seed, the descriptor version, source identities (content hashes), the final tile assignments with crop rectangles and colour adjustments, the target cells and match statistics. Previews and exports always reuse the saved assignment, so changing DPI or paper never re-matches.
 
+**Outline (optional).** `outline` holds the shape (built-in, or a file path with its content hash and the invert/cover flags), the background colour and the edge threshold. The shape is sampled 6×6 times per tile (2×2 above 250k tiles); a tile is placed when its inside share is at least the threshold. Tiles outside are stored as `{"p": 4294967295}` (empty), are skipped by matching, reuse limits and statistics, and render as the background colour (motif blend is not applied there). Edges follow tile borders, so no photo is cut. PDF pages whose window holds no placed tile are left out and drawn grey on the assembly map. Older projects without `outline` load unchanged.
+
 Before an export, every source is resolved to an existing, unchanged file. A changed stat triggers a re-hash. Missing, changed or unindexed sources are listed with the number of affected tiles and the fix (relink, restore, update index). The export does not start, and photos are never silently substituted.
 
 ## Large output and printing
@@ -165,6 +175,7 @@ Before an export, every source is resolved to an existing, unchanged file. A cha
 | Nearest neighbours | `kiddo` k-d tree | Measured roughly 150–750× faster than exhaustive search at 100k photos with the same best candidate (see benchmarks). |
 | Parallelism | `rayon`, one global pool | Decode, match and render share it, so they don't oversubscribe the CPU. |
 | Encoders | `png`, `jpeg-encoder`, `flate2`; in-tree BigTIFF and PDF writers | Streaming with bounded memory. `pdf-writer` keeps the whole document in memory. |
+| SVG shapes | `resvg` (no text/fonts features) | Pure Rust SVG renderer; only used to rasterise outline masks. |
 | UI | Slint (Fluent style), `rfd` file dialogs | Polished, Rust-native, no web stack. Slint's royalty-free licence requires attribution in the app or docs. |
 
 ## Benchmarks

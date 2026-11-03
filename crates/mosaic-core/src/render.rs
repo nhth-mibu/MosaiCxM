@@ -161,6 +161,11 @@ impl<'a> Renderer<'a> {
         RenderStats { cache_hits: c.hits, cache_misses: c.misses, cache_peak_bytes: c.bytes }
     }
 
+    /// Colour shown where no photo is placed.
+    pub fn background(&self) -> [u8; 3] {
+        self.project.outline.as_ref().map(|o| o.background).unwrap_or([255; 3])
+    }
+
     /// Largest tile pixmap in bytes (for memory estimates).
     pub fn max_tile_bytes(&self) -> u64 {
         let mw = self.xs.windows(2).map(|w| w[1] - w[0]).max().unwrap_or(1);
@@ -219,9 +224,12 @@ impl<'a> Renderer<'a> {
     /// Render global pixel rectangle [x0, x0+w) × [y0, y0+h) as RGB8.
     pub fn render_region(&self, x0: u64, y0: u64, w: u64, h: u64, job: &Job) -> Result<Vec<u8>> {
         let len = w.checked_mul(h).and_then(|v| v.checked_mul(3)).ok_or_else(|| anyhow!("region too large"))?;
-        let mut buf = vec![255u8; usize::try_from(len)?];
+        let bg = self.background();
+        let mut buf: Vec<u8> = bg.iter().copied().cycle().take(usize::try_from(len)?).collect();
         let (x1, y1) = (x0 + w, y0 + h);
-        let tiles = self.tiles_in(x0, y0, x1, y1);
+        let all = self.tiles_in(x0, y0, x1, y1);
+        let tiles: Vec<usize> = all.iter().copied().filter(|&i| !self.project.tiles[i].is_empty()).collect();
+        let has_empty = tiles.len() != all.len();
         // Render missing pixmaps in parallel, in bounded batches.
         for batch in tiles.chunks(256) {
             job.check()?;
@@ -269,6 +277,20 @@ impl<'a> Renderer<'a> {
         }
         if let Some((alpha, cells)) = &self.blend {
             self.apply_blend(&mut buf, x0, y0, w, h, *alpha, cells);
+            if has_empty {
+                // The motif is not blended outside the outline.
+                for &i in all.iter().filter(|&&i| self.project.tiles[i].is_empty()) {
+                    let (tx0, ty0, tx1, ty1) = self.tile_rect(i);
+                    let (ix0, iy0, ix1, iy1) = (tx0.max(x0), ty0.max(y0), tx1.min(x1), ty1.min(y1));
+                    for y in iy0..iy1 {
+                        let row = (y - y0) as usize * w as usize;
+                        for x in ix0..ix1 {
+                            let o = (row + (x - x0) as usize) * 3;
+                            buf[o..o + 3].copy_from_slice(&bg);
+                        }
+                    }
+                }
+            }
         }
         Ok(buf)
     }

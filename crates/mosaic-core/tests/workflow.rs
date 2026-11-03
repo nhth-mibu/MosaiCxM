@@ -400,3 +400,62 @@ fn scan_is_recursive_and_skips_system_folders() {
     let again = update_library(&e.cat, lib, &opts(), &Job::default()).unwrap();
     assert_eq!((again.added, again.removed), (0, 0));
 }
+
+#[test]
+fn outline_limits_tiles_render_and_print_pages() {
+    use mosaic_core::matching::TileAssign;
+    use mosaic_core::shape::{Outline, Shape};
+    let (e, a) = indexed_env(40);
+    // 2 m wide strip whose right half is outside the shape (SVG draws the left half).
+    let grid = GridSpec::new(2000.0, 500.0, 40, 10).unwrap();
+    let svg = e.root.join("half.svg");
+    std::fs::write(&svg, r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 100"><rect width="200" height="100"/></svg>"#).unwrap();
+    let mut o = Outline::new(Shape::from_file(&svg, false).unwrap());
+    o.background = [10, 20, 30];
+    let pool = Pool::load(&e.cat, &[a], true).unwrap();
+    let m = e.root.join("motif.png");
+    motif(&m);
+    let (t, mref) = load_target(&m, &grid).unwrap();
+    let mut s = MatchSettings::for_method(Method::Variety);
+    s.max_reuse = Some(6); // 200 placed tiles ≤ 40 × 6, but 400 would not fit
+    let p = Project::create_with_outline(&pool, libraries_refs(&e.cat, &[a]).unwrap(), &t, mref, grid, s, Some(o), &Job::default()).unwrap();
+    assert_eq!(p.placed_tiles(), 200);
+    assert_eq!(p.stats.tiles, 200);
+    for (i, tile) in p.tiles.iter().enumerate() {
+        assert_eq!(tile.is_empty(), i % 40 >= 20, "tile {i}");
+    }
+    assert!(p.usage().iter().all(|&u| (1..=6).contains(&u)));
+
+    // Save / load keeps the outline and the empty tiles.
+    let path = e.root.join("shape.json");
+    p.save(&path).unwrap();
+    let q = Project::load(&path).unwrap();
+    assert_eq!(q.outline, p.outline);
+    assert_eq!(q.tiles, p.tiles);
+    assert!(q.tiles[39] == TileAssign::EMPTY);
+
+    // Outside the shape is painted with the background colour.
+    let thumbs = ThumbSource::load_for(&e.cat, &p.source_hashes().unwrap()).unwrap();
+    let spec = RasterSpec::with_pixels(2000.0, 500.0, 400, 100).unwrap();
+    let r = Renderer::new(&p, spec, &thumbs, 1 << 20).unwrap();
+    let px = r.render_region(0, 0, 400, 100, &Job::default()).unwrap();
+    let at = |x: usize, y: usize| [px[(y * 400 + x) * 3], px[(y * 400 + x) * 3 + 1], px[(y * 400 + x) * 3 + 2]];
+    assert_eq!(at(300, 50), [10, 20, 30]);
+    assert_eq!(at(399, 99), [10, 20, 30]);
+    assert_ne!(at(50, 50), [10, 20, 30]);
+
+    // Print pages that lie fully outside the shape are skipped.
+    let mut ps = PrintSettings::new(paper_by_name("A3").unwrap());
+    ps.dpi = 30.0;
+    let plan = plan_pdf(&p, &ps).unwrap();
+    assert!(plan.blank_pages() > 0 && plan.printed_pages() < plan.layout.pages.len(), "{}", plan.summary());
+    let out = e.root.join("shape.pdf");
+    export_pdf(&p, &thumbs_source(&e, &p), None, &plan, &out, &Job::default()).unwrap();
+    let bytes = std::fs::read(&out).unwrap();
+    let count = String::from_utf8_lossy(&bytes).matches("/Type /Page ").count();
+    assert_eq!(count, plan.printed_pages() + 1);
+}
+
+fn thumbs_source(e: &Env, p: &Project) -> ThumbSource {
+    ThumbSource::load_for(&e.cat, &p.source_hashes().unwrap()).unwrap()
+}

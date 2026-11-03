@@ -356,6 +356,14 @@ pub struct TileAssign {
     pub adjust: [f32; 3],
 }
 
+impl TileAssign {
+    /// Tile outside the mosaic outline: nothing is placed, background is shown.
+    pub const EMPTY: TileAssign = TileAssign { photo: u32::MAX, crop: [0.0; 4], adjust: [0.0; 3] };
+    pub fn is_empty(&self) -> bool {
+        self.photo == u32::MAX
+    }
+}
+
 fn is_zero3(a: &[f32; 3]) -> bool {
     a.iter().all(|v| *v == 0.0)
 }
@@ -400,7 +408,11 @@ pub enum MatchError {
 }
 
 pub fn check_feasible(grid: &GridSpec, groups: u32, s: &MatchSettings) -> Result<(), Infeasible> {
-    let tiles = grid.tiles();
+    check_feasible_n(grid, grid.tiles(), groups, s)
+}
+
+/// Like [`check_feasible`] for `tiles` placed tiles (fewer when an outline is used).
+pub fn check_feasible_n(grid: &GridSpec, tiles: usize, groups: u32, s: &MatchSettings) -> Result<(), Infeasible> {
     let Some(m) = s.max_reuse else { return Ok(()) };
     let capacity = groups as u64 * m as u64;
     if capacity >= tiles as u64 {
@@ -431,12 +443,34 @@ pub fn check_feasible(grid: &GridSpec, groups: u32, s: &MatchSettings) -> Result
 
 /// Match a target against a pool. Deterministic for a given seed.
 pub fn match_tiles(pool: &Pool, target: &Target, grid: &GridSpec, s: &MatchSettings, job: &Job) -> Result<(Vec<TileAssign>, MatchStats), MatchError> {
+    match_tiles_masked(pool, target, grid, s, None, job)
+}
+
+/// Match only the `active` tiles (row-major; None = all). Inactive tiles
+/// become [`TileAssign::EMPTY`].
+pub fn match_tiles_masked(
+    pool: &Pool,
+    target: &Target,
+    grid: &GridSpec,
+    s: &MatchSettings,
+    active: Option<&[bool]>,
+    job: &Job,
+) -> Result<(Vec<TileAssign>, MatchStats), MatchError> {
     s.validate()?;
     if pool.photos.is_empty() {
         return Err(anyhow::anyhow!("no source photos available").into());
     }
-    check_feasible(grid, pool.group_count, s).map_err(MatchError::Infeasible)?;
-    let mut stats = MatchStats { pool_photos: pool.photos.len(), pool_groups: pool.group_count, tiles: grid.tiles(), ..Default::default() };
+    let all = vec![true; grid.tiles()];
+    let active = active.unwrap_or(&all);
+    if active.len() != grid.tiles() {
+        return Err(anyhow::anyhow!("outline does not match the grid").into());
+    }
+    let placed_tiles = active.iter().filter(|&&a| a).count();
+    if placed_tiles == 0 {
+        return Err(anyhow::anyhow!("the outline leaves no tile to fill").into());
+    }
+    check_feasible_n(grid, placed_tiles, pool.group_count, s).map_err(MatchError::Infeasible)?;
+    let mut stats = MatchStats { pool_photos: pool.photos.len(), pool_groups: pool.group_count, tiles: placed_tiles, ..Default::default() };
     let t0 = Instant::now();
     job.report("building candidates", 0, 1);
     let cands = build_candidates(pool, grid.tile_aspect(), s.crop_offsets);
@@ -444,10 +478,10 @@ pub fn match_tiles(pool: &Pool, target: &Target, grid: &GridSpec, s: &MatchSetti
     stats.candidates = cands.len();
     stats.build_ms = ms(t0);
     job.check()?;
-    let lists = retrieve(&cands, &retrieval, target, s, job)?;
+    let lists = retrieve_active(&cands, &retrieval, target, s, Some(active), job)?;
     stats.retrieval_ms = ms(t0) - stats.build_ms;
     let t1 = Instant::now();
-    let tiles = assign(pool, &cands, &retrieval, target, grid, s, &lists, &mut stats, job)?;
+    let tiles = assign(pool, &cands, &retrieval, target, grid, s, active, &lists, &mut stats, job)?;
     stats.assign_ms = ms(t1);
     Ok((tiles, stats))
 }
@@ -458,6 +492,11 @@ fn ms(t: Instant) -> f64 {
 
 /// Per tile: retrieved candidates reranked by method score (ascending).
 pub fn retrieve(cands: &[Candidate], r: &Retrieval, target: &Target, s: &MatchSettings, job: &Job) -> Result<Vec<Vec<(u32, f32)>>> {
+    retrieve_active(cands, r, target, s, None, job)
+}
+
+/// [`retrieve`] that leaves inactive tiles with an empty list.
+pub fn retrieve_active(cands: &[Candidate], r: &Retrieval, target: &Target, s: &MatchSettings, active: Option<&[bool]>, job: &Job) -> Result<Vec<Vec<(u32, f32)>>> {
     let k = s.candidates.max(4);
     let n = target.tiles.len();
     let mut out = Vec::with_capacity(n);
@@ -465,7 +504,11 @@ pub fn retrieve(cands: &[Candidate], r: &Retrieval, target: &Target, s: &MatchSe
         job.check()?;
         let part: Vec<Vec<(u32, f32)>> = chunk
             .par_iter()
-            .map(|t| {
+            .enumerate()
+            .map(|(j, t)| {
+                if active.map(|a| !a[ci * 4096 + j]).unwrap_or(false) {
+                    return Vec::new();
+                }
                 let mut v: Vec<(u32, f32)> = r.query(cands, t, k).into_iter().map(|c| (c, score(s.method, t, &cands[c as usize]))).collect();
                 v.sort_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)));
                 v
@@ -485,6 +528,7 @@ fn assign(
     target: &Target,
     grid: &GridSpec,
     s: &MatchSettings,
+    active: &[bool],
     lists: &[Vec<(u32, f32)>],
     stats: &mut MatchStats,
     job: &Job,
@@ -495,7 +539,7 @@ fn assign(
     let cap = s.max_reuse.unwrap_or(u32::MAX);
     let mut uses = vec![0u32; pool.group_count as usize];
     let mut placed: Vec<u32> = vec![u32::MAX; n]; // candidate index
-    let mut order: Vec<u32> = (0..n as u32).collect();
+    let mut order: Vec<u32> = (0..n as u32).filter(|&t| active[t as usize]).collect();
     SplitMix64::new(s.seed).shuffle(&mut order);
     let radius = s.repeat_radius as i64;
     let use_neighbors = s.repeat_penalty > 0.0 && radius > 0;
@@ -507,7 +551,7 @@ fn assign(
     for (step, &t) in order.iter().enumerate() {
         if step % 8192 == 0 {
             job.check()?;
-            job.report("assigning tiles", step as u64, n as u64);
+            job.report("assigning tiles", step as u64, order.len() as u64);
         }
         let t = t as usize;
         neigh.clear();
@@ -593,6 +637,10 @@ fn assign(
     let mut de_sum = 0f64;
     let mut cost_sum = 0f64;
     for t in 0..n {
+        if placed[t] == u32::MAX {
+            out.push(TileAssign::EMPTY);
+            continue;
+        }
         let c = &cands[placed[t] as usize];
         let tm = mean_lab(&target.tiles[t]);
         de_sum += de2(&tm, &c.mean).sqrt() as f64;
@@ -616,13 +664,14 @@ fn assign(
         out.push(TileAssign { photo: c.photo, crop: c.crop, adjust });
     }
     let mut per_group = vec![0u32; pool.group_count as usize];
-    for p in &placed {
+    for p in placed.iter().filter(|&&p| p != u32::MAX) {
         per_group[cands[*p as usize].group as usize] += 1;
     }
     stats.distinct_used = per_group.iter().filter(|&&u| u > 0).count();
     stats.max_uses = per_group.iter().copied().max().unwrap_or(0);
-    stats.mean_delta_e = (de_sum / n as f64) as f32;
-    stats.mean_cost = (cost_sum / n as f64) as f32;
+    let m = order.len().max(1) as f64;
+    stats.mean_delta_e = (de_sum / m) as f32;
+    stats.mean_cost = (cost_sum / m) as f32;
     stats.nearby_repeats = count_nearby_repeats(&out, pool, grid.cols, 1);
     Ok(out)
 }
@@ -663,7 +712,11 @@ pub fn count_nearby_repeats(tiles: &[TileAssign], pool: &Pool, cols: u32, radius
     let mut n = 0;
     for y in 0..rows {
         for x in 0..cols {
-            let g = pool.photos[tiles[(y * cols + x) as usize].photo as usize].group;
+            let t = &tiles[(y * cols + x) as usize];
+            if t.is_empty() {
+                continue;
+            }
+            let g = pool.photos[t.photo as usize].group;
             for dy in 0..=radius {
                 for dx in -radius..=radius {
                     if dy == 0 && dx <= 0 {
@@ -673,7 +726,8 @@ pub fn count_nearby_repeats(tiles: &[TileAssign], pool: &Pool, cols: u32, radius
                     if nx < 0 || nx >= cols || ny >= rows {
                         continue;
                     }
-                    if pool.photos[tiles[(ny * cols + nx) as usize].photo as usize].group == g {
+                    let o = &tiles[(ny * cols + nx) as usize];
+                    if !o.is_empty() && pool.photos[o.photo as usize].group == g {
                         n += 1;
                     }
                 }

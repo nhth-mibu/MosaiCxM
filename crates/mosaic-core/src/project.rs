@@ -8,8 +8,10 @@ use crate::color::{dequantize_lab, quantize_lab, Lab};
 use crate::decode;
 use crate::descriptor::{CELLS, DESCRIPTOR_VERSION};
 use crate::job::Job;
-use crate::matching::{match_tiles, GridSpec, MatchError, MatchSettings, MatchStats, Target, TileAssign};
+use crate::matching::{GridSpec, MatchError, MatchSettings, MatchStats, Target, TileAssign};
+use crate::matching::match_tiles_masked;
 use crate::pool::Pool;
+use crate::shape::Outline;
 use anyhow::{anyhow, bail, Context, Result};
 use base64::Engine;
 use serde::{Deserialize, Serialize};
@@ -57,6 +59,9 @@ pub struct Project {
     /// Target motif cells (CELLS×CELLS per tile), quantised Lab, base64.
     pub target_cells: String,
     pub stats: MatchStats,
+    /// Mosaic outline; tiles outside it are [`TileAssign::EMPTY`]. None = full rectangle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outline: Option<Outline>,
 }
 
 /// Load the motif and sample it for the grid.
@@ -86,13 +91,32 @@ impl Project {
         settings: MatchSettings,
         job: &Job,
     ) -> Result<Project, MatchError> {
-        let (tiles, stats) = match_tiles(pool, target, &grid, &settings, job)?;
+        Self::create_with_outline(pool, libraries, target, motif, grid, settings, None, job)
+    }
+
+    /// Like [`Project::create`], limited to the tiles inside `outline`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_with_outline(
+        pool: &Pool,
+        libraries: Vec<LibraryRef>,
+        target: &Target,
+        motif: MotifRef,
+        grid: GridSpec,
+        settings: MatchSettings,
+        outline: Option<Outline>,
+        job: &Job,
+    ) -> Result<Project, MatchError> {
+        let active = outline.as_ref().map(|o| o.active_tiles(&grid)).transpose()?;
+        let (tiles, stats) = match_tiles_masked(pool, target, &grid, &settings, active.as_deref(), job)?;
         // Keep only the photos actually used, in first-use order.
         let mut remap: HashMap<u32, u32> = HashMap::new();
         let mut sources = Vec::new();
         let tiles = tiles
             .into_iter()
             .map(|mut t| {
+                if t.is_empty() {
+                    return t;
+                }
                 let next = remap.len() as u32;
                 let idx = *remap.entry(t.photo).or_insert_with(|| {
                     let p = &pool.photos[t.photo as usize];
@@ -115,6 +139,7 @@ impl Project {
             tiles,
             target_cells: encode_cells(&target.cells()),
             stats,
+            outline,
         })
     }
 
@@ -134,10 +159,29 @@ impl Project {
         if p.tiles.len() != p.grid.tiles() {
             bail!("project is inconsistent: {} tiles for a {}×{} grid", p.tiles.len(), p.grid.cols, p.grid.rows);
         }
-        if p.tiles.iter().any(|t| t.photo as usize >= p.sources.len()) {
+        if p.tiles.iter().any(|t| if t.is_empty() { p.outline.is_none() } else { t.photo as usize >= p.sources.len() }) {
             bail!("project is inconsistent: tile refers to unknown source");
         }
         Ok(p)
+    }
+
+    /// Number of tiles showing a photo (all tiles unless an outline is set).
+    pub fn placed_tiles(&self) -> usize {
+        self.tiles.iter().filter(|t| !t.is_empty()).count()
+    }
+
+    /// Whether any photo tile overlaps the artwork window [x0, x1) × [y0, y1) in mm.
+    pub fn window_has_tiles(&self, x0: f64, x1: f64, y0: f64, y1: f64) -> bool {
+        if self.outline.is_none() {
+            return true;
+        }
+        let g = &self.grid;
+        let (tw, th) = g.tile_mm();
+        let c0 = ((x0 / tw).floor().max(0.0) as u32).min(g.cols);
+        let c1 = ((x1 / tw).ceil().max(0.0) as u32).min(g.cols);
+        let r0 = ((y0 / th).floor().max(0.0) as u32).min(g.rows);
+        let r1 = ((y1 / th).ceil().max(0.0) as u32).min(g.rows);
+        (r0..r1).any(|r| (c0..c1).any(|c| !self.tiles[(r * g.cols + c) as usize].is_empty()))
     }
 
     pub fn target_cells(&self) -> Result<Vec<Lab>> {
@@ -155,7 +199,7 @@ impl Project {
     /// Uses per source index.
     pub fn usage(&self) -> Vec<u32> {
         let mut u = vec![0u32; self.sources.len()];
-        for t in &self.tiles {
+        for t in self.tiles.iter().filter(|t| !t.is_empty()) {
             u[t.photo as usize] += 1;
         }
         u
@@ -456,7 +500,7 @@ pub fn output_stats(cat: &Catalog, p: &Project, output: &Path, kind: &str, detai
         details,
         artwork_mm: (p.grid.width_mm, p.grid.height_mm),
         grid: (p.grid.cols, p.grid.rows),
-        tiles: p.tiles.len(),
+        tiles: p.placed_tiles(),
         distinct_photos_used: p.sources.len(),
         max_uses_of_one_photo: usage.iter().copied().max().unwrap_or(0),
         photos_used_once: usage.iter().filter(|&&u| u == 1).count(),

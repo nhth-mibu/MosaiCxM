@@ -63,6 +63,7 @@ Not sure which picture to use? Click **Help me choose**. The app tries pictures 
   - **Sharp** matches colours as closely as possible. Fastest.
   - **Balanced** also follows edges and shading, so outlines look cleaner. A good default.
   - **Varied** uses as many different photos as possible and avoids the same photo next to itself.
+- **Shape:** keep the mosaic a rectangle, or give it an outline: ellipse, heart, hexagon, diamond, star, or **your own shape from a file**. In an SVG file the drawn parts are the shape; in a PNG with transparency the solid parts; in any other picture (JPG…) the dark parts. Tick **Swap inside and outside** to flip it. Tiles outside the shape stay empty (white, black or light grey), and print pages that would be empty are not printed. **Advanced → Edge tiles** sets how much of a tile must be inside the shape to get a photo.
 
 Click **Make preview**. This can take from a few seconds to a minute with very large photo collections. When you change something, the app shows **"Settings changed since this preview"**; click **Update preview** to see the new result.
 
