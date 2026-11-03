@@ -1,0 +1,8 @@
+[workspace]
+resolver = "2"
+members = ["crates/mosaic-core", "crates/mosaic-cli"]
+
+[profile.release]
+debug = 1
+[profile.dev.package."*"]
+opt-level = 2

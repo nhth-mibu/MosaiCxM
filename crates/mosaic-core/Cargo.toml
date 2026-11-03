@@ -1,0 +1,25 @@
+[package]
+name = "mosaic-core"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.104"
+base64 = "0.23.1"
+blake3 = "1.8.7"
+fast_image_resize = "6.1.0"
+flate2 = "1.1.10"
+fs4 = "1.1.0"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+jpeg-decoder = "0.3.2"
+jpeg-encoder = "0.7.1"
+kamadak-exif = "0.6.1"
+kiddo = "6.3.0"
+moxcms = "0.9.1"
+png = "0.18.1"
+rayon = "1.12.0"
+rusqlite = { version = "0.41.1", features = ["bundled"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+thiserror = "2.0.21"
+walkdir = "2.5.0"
