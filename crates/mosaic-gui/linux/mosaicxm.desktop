@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=MosaiCxM
+Comment=Build photo mosaics from your own photos
+Exec=mosaic-gui
+Icon=mosaicxm
+Terminal=false
+Categories=Graphics;Photography;

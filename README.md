@@ -12,7 +12,7 @@ Download the latest version from the [Releases page](https://github.com/nhth-mib
 
 - **Windows:** download the `windows-x64.zip`, unzip it and open `mosaic-gui.exe`.
 - **Mac (Apple silicon):** download the `.dmg`, drag **MosaiCxM** to Applications. The first time, right-click the app and choose **Open**.
-- **Linux:** download the `linux-x64.tar.gz`, unpack it and run `mosaic-gui`.
+- **Linux:** download the `linux-x64.tar.gz`, unpack it and run `mosaic-gui`. Run `./install.sh` once to add it to your app menu.
 
 ## How to make a mosaic
 
