@@ -2490,6 +2490,7 @@ dependencies = [
  "moxcms 0.8.1",
  "num-traits",
  "png",
+ "tiff",
  "zune-core",
  "zune-jpeg",
 ]

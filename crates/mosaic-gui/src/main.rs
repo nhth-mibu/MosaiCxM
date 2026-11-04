@@ -751,7 +751,7 @@ fn main() -> Result<()> {
         let w = ui.as_weak();
         ui.on_browse_motif(move || {
             let ui = w.unwrap();
-            if let Some(p) = rfd::FileDialog::new().set_title("Choose the picture for your mosaic").add_filter("Images", &["jpg", "jpeg", "png", "webp"]).pick_file() {
+            if let Some(p) = rfd::FileDialog::new().set_title("Choose the picture for your mosaic").add_filter("Images", &["jpg", "jpeg", "png", "webp", "tif", "tiff"]).pick_file() {
                 show_motif(&ui, &p);
                 mark_stale(&ui);
                 ui.set_open_step(3);

@@ -122,7 +122,7 @@ The notes explain the result in plain words, for example "strong colour coverage
 
 ## Libraries and indexing
 
-- Formats: JPEG, PNG and WebP, detected from file content. Files are only picked up by extension (`jpg jpeg jpe jfif png webp`). Other files are counted as ignored.
+- Formats: JPEG, PNG, WebP and TIFF (incl. BigTIFF), detected from file content. Files are only picked up by extension, case-insensitive (`jpg jpeg jpe jfif png webp tif tiff`). 16-bit PNG/TIFF is reduced to 8 bits per channel; alpha is composited over white. Other files are counted as ignored.
 - Folders are scanned at any depth. Symlinked folders are followed; a symlink loop is reported once and not scanned twice. If a folder can't be read, files already indexed under it are kept rather than marked removed.
 - Skipped: hidden files and folders (names starting with `.`, which covers macOS `._` files, `.Trashes` and `.Spotlight-V100`) and system or NAS folders (`@eaDir`, `#recycle`, `#snapshot`, `$RECYCLE.BIN`, `System Volume Information`, `lost+found`). Motif folders use the same rules.
 - **EXIF orientation** is applied before analysis, preview and export, so crops always refer to the upright image.
@@ -167,9 +167,9 @@ Before an export, every source is resolved to an existing, unchanged file. A cha
 
 | Need | Choice | Why / trade-off |
 |---|---|---|
-| Decode | `image` (PNG, WebP), `jpeg-decoder` (JPEG with DCT scaling) | DCT scaling makes indexing and export decode only what is needed. `jpeg-decoder` is in maintenance mode but stable. |
+| Decode | `image` (PNG, WebP, TIFF), `jpeg-decoder` (JPEG with DCT scaling) | DCT scaling makes indexing and export decode only what is needed. `jpeg-decoder` is in maintenance mode but stable. |
 | Resize | `fast_image_resize` | SIMD convolution; much faster than `image::imageops`. |
-| EXIF | `kamadak-exif` (+ `image` orientation parser) | Pure Rust; reads JPEG/PNG/WebP containers. |
+| EXIF | `kamadak-exif` (+ `image` orientation parser) | Pure Rust; reads JPEG/PNG/WebP/TIFF containers. |
 | ICC | `moxcms` | Pure Rust CMS (also used by `image`); avoids a C `lcms2` build. |
 | Database | `rusqlite` (bundled SQLite) | One local file, transactional, no server. |
 | Hash | `blake3` | Fast full-content hashing for change and duplicate detection. |
