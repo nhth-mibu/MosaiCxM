@@ -290,7 +290,7 @@ export component AppWindow inherits Window {
 
     // ----- which step is open, and what the big area on the right shows
     in-out property <int> open-step: 1;
-    in-out property <int> main-view: 0; // 0 preview, 1 motif suggestions, 2 info text
+    in-out property <int> main-view: 0; // 0 preview, 1 motif suggestions, 2 info text, 3 statistics, 4 folder check
     in-out property <string> info-title;
     in-out property <string> info-text;
     in-out property <string> notice; // error or important message shown above the preview
@@ -302,6 +302,12 @@ export component AppWindow inherits Window {
     in-out property <int> photo-count: 0;
     in-out property <int> skipped-count: 0;
     in-out property <bool> show-collections: false;
+    // Folder check: shown after a folder is picked, before it is added.
+    in-out property <string> check-folder;
+    in-out property <string> check-summary;
+    in-out property <int> check-count: 0;
+    in-out property <bool> check-done: false;
+    in-out property <[image]> check-thumbs;
 
     // ----- 2 Picture
     in-out property <string> motif-path;
@@ -382,6 +388,8 @@ export component AppWindow inherits Window {
     in-out property <bool> progress-known: false;
 
     callback add-folder();
+    callback confirm-folder();
+    callback cancel-folder-check();
     callback remove-folder(int);
     callback find-folder(int);
     callback toggle-collection(int, bool);
@@ -963,6 +971,60 @@ export component AppWindow inherits Window {
                                     horizontal-stretch: 1;
                                     for c[i] in root.stat-charts-right: BarChart { chart: c; tint: Theme.chart-colors[i * 2 + 1]; }
                                 }
+                            }
+                        }
+                    }
+                }
+
+                if root.main-view == 4: VerticalLayout {
+                    spacing: 10px;
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Rectangle { width: 6px; border-radius: 3px; background: Theme.teal; }
+                        VerticalLayout {
+                            horizontal-stretch: 1;
+                            Text { text: "Is this the right folder?"; font-size: 18px; font-weight: 700; color: Theme.fg; }
+                            Text { text: root.check-folder; font-size: 12px; color: Theme.muted; overflow: elide; }
+                        }
+                    }
+                    Text { text: root.check-summary; font-size: 14px; font-weight: 600; color: root.check-done && root.check-count == 0 ? Theme.coral : Theme.fg; wrap: word-wrap; }
+                    HorizontalLayout {
+                        spacing: 12px;
+                        alignment: start;
+                        ColorButton {
+                            text: "Use this folder";
+                            tint: Theme.teal;
+                            enabled: !root.busy && root.check-count > 0;
+                            clicked => { root.confirm-folder(); }
+                        }
+                        ColorButton {
+                            text: "Pick another folder…";
+                            tint: Theme.muted;
+                            enabled: !root.busy;
+                            clicked => { root.add-folder(); }
+                        }
+                        LinkButton { text: "Cancel"; font-weight: 600; vertical-alignment: center; clicked => { root.cancel-folder-check(); } }
+                    }
+                    Rectangle {
+                        vertical-stretch: 1;
+                        background: Theme.surface;
+                        border-radius: 10px;
+                        border-width: 1px;
+                        border-color: Theme.line;
+                        clip: true;
+                        check-scroll := ScrollView {
+                            property <length> cell: 132px;
+                            property <int> per-row: max(1, floor((check-scroll.visible-width - 12px) / (cell + 6px)));
+                            content-height: ceil(root.check-thumbs.length / per-row) * (cell + 6px) + 12px;
+                            for t[i] in root.check-thumbs: Rectangle {
+                                x: 8px + mod(i, check-scroll.per-row) * (check-scroll.cell + 6px);
+                                y: 8px + floor(i / check-scroll.per-row) * (check-scroll.cell + 6px);
+                                width: check-scroll.cell;
+                                height: check-scroll.cell;
+                                border-radius: 6px;
+                                clip: true;
+                                background: Theme.line;
+                                Image { source: t; width: parent.width; height: parent.height; image-fit: cover; }
                             }
                         }
                     }
