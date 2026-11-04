@@ -131,6 +131,40 @@ component LinkButton inherits Text {
     ta := TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
 }
 
+// Collapsible "Advanced" box inside a step card: its own background and a
+// border in the step colour, so it stands out from the card around it.
+// Put the content in as `if root.<flag>: VerticalLayout { ... }`.
+component AdvancedPanel inherits Rectangle {
+    in property <string> text;
+    in property <bool> expanded;
+    in property <color> tint: Theme.amber;
+    callback toggled();
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: ta.has-hover ? root.tint : root.tint.with-alpha(0.6);
+    background: Theme.surface;
+    VerticalLayout {
+        padding: 10px;
+        spacing: 8px;
+        Rectangle {
+            height: 22px;
+            ta := TouchArea { mouse-cursor: pointer; clicked => { root.toggled(); } }
+            HorizontalLayout {
+                spacing: 6px;
+                Text { text: root.expanded ? "▾" : "▸"; color: root.tint; font-size: 13px; font-weight: 700; vertical-alignment: center; }
+                Text { text: "Advanced"; color: root.tint; font-size: 13px; font-weight: 700; vertical-alignment: center; }
+                Text { text: root.text; color: Theme.muted; font-size: 12px; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; }
+            }
+        }
+        @children
+    }
+}
+
+// Wrapped hint inside an AdvancedPanel (step width minus the panel padding).
+component PanelHint inherits Hint {
+    width: 282px;
+}
+
 // Segmented control: one choice out of a few.
 component Segmented inherits Rectangle {
     in property <[string]> options;
@@ -642,48 +676,50 @@ export component AppWindow inherits Window {
                                     }
                                 }
                                 StepHint { text: root.style-help; }
-                                LinkButton {
-                                    text: (root.size-advanced ? "▾" : "▸") + " Advanced (grid, reuse, colour correction…)";
-                                    clicked => { root.size-advanced = !root.size-advanced; }
-                                }
-                                if root.size-advanced: VerticalLayout {
-                                    spacing: 6px;
-                                    Switch { text: "Set columns × rows instead of tile size"; checked <=> root.use-grid; toggled => { root.changed(); } }
-                                    if root.use-grid: Field {
-                                        label: "Columns × rows";
-                                        SpinBox { minimum: 1; maximum: 2000; value <=> root.cols; edited => { root.changed(); } }
-                                        SpinBox { minimum: 1; maximum: 2000; value <=> root.rows; edited => { root.changed(); } }
-                                    }
-                                    CheckBox { text: "Use each photo as often as needed"; checked <=> root.unlimited-reuse; toggled => { root.changed(); } }
-                                    Field { label: "Max uses per photo"; SpinBox { enabled: !root.unlimited-reuse; minimum: 1; maximum: 10000; value <=> root.max-reuse; edited => { root.changed(); } } }
-                                    Field {
-                                        label: "Avoid nearby repeats";
-                                        Slider { minimum: 0; maximum: 30; value <=> root.repeat-penalty; changed => { root.changed(); } }
-                                        Text { text: round(root.repeat-penalty); min-width: 28px; color: Theme.fg; vertical-alignment: center; }
-                                    }
-                                    Field { label: "…within (tiles)"; SpinBox { minimum: 1; maximum: 20; value <=> root.repeat-radius; edited => { root.changed(); } } }
-                                    Field {
-                                        label: "Spread photo use";
-                                        Slider { enabled: root.style-index == 2; minimum: 0; maximum: 10; value <=> root.usage-penalty; changed => { root.changed(); } }
-                                        Text { text: round(root.usage-penalty * 10) / 10; min-width: 28px; color: Theme.fg; vertical-alignment: center; }
-                                    }
-                                    CheckBox { text: "Try off-centre crops"; checked <=> root.crop-offsets; toggled => { root.changed(); } }
-                                    if root.shape-index > 0: Field {
-                                        label: "Edge tiles";
-                                        Slider { minimum: 0.05; maximum: 1; value <=> root.shape-threshold; changed => { root.changed(); } }
-                                        Text { text: round(root.shape-threshold * 100) + "% in"; min-width: 48px; color: Theme.fg; vertical-alignment: center; }
-                                    }
-                                    Field { label: "Shuffle number"; SpinBox { minimum: 0; maximum: 1000000; value <=> root.seed; edited => { root.changed(); } } }
-                                    StepHint { text: "These two change how your photos look. Higher values make the picture easier to recognise."; }
-                                    Field {
-                                        label: "Colour correction";
-                                        Slider { minimum: 0; maximum: 0.5; value <=> root.color-correction; changed => { root.changed(); } }
-                                        Text { text: round(root.color-correction * 100) + "%"; min-width: 36px; color: Theme.fg; vertical-alignment: center; }
-                                    }
-                                    Field {
-                                        label: "Blend in picture";
-                                        Slider { minimum: 0; maximum: 0.5; value <=> root.motif-blend; changed => { root.changed(); } }
-                                        Text { text: round(root.motif-blend * 100) + "%"; min-width: 36px; color: Theme.fg; vertical-alignment: center; }
+                                AdvancedPanel {
+                                    text: "grid, reuse, colour correction…";
+                                    expanded: root.size-advanced;
+                                    tint: Theme.amber;
+                                    toggled => { root.size-advanced = !root.size-advanced; }
+                                    if root.size-advanced: VerticalLayout {
+                                        spacing: 6px;
+                                        Switch { text: "Set columns × rows instead of tile size"; checked <=> root.use-grid; toggled => { root.changed(); } }
+                                        if root.use-grid: Field {
+                                            label: "Columns × rows";
+                                            SpinBox { minimum: 1; maximum: 2000; value <=> root.cols; edited => { root.changed(); } }
+                                            SpinBox { minimum: 1; maximum: 2000; value <=> root.rows; edited => { root.changed(); } }
+                                        }
+                                        CheckBox { text: "Use each photo as often as needed"; checked <=> root.unlimited-reuse; toggled => { root.changed(); } }
+                                        Field { label: "Max uses per photo"; SpinBox { enabled: !root.unlimited-reuse; minimum: 1; maximum: 10000; value <=> root.max-reuse; edited => { root.changed(); } } }
+                                        Field {
+                                            label: "Avoid nearby repeats";
+                                            Slider { minimum: 0; maximum: 30; value <=> root.repeat-penalty; changed => { root.changed(); } }
+                                            Text { text: round(root.repeat-penalty); min-width: 28px; color: Theme.fg; vertical-alignment: center; }
+                                        }
+                                        Field { label: "…within (tiles)"; SpinBox { minimum: 1; maximum: 20; value <=> root.repeat-radius; edited => { root.changed(); } } }
+                                        Field {
+                                            label: "Spread photo use";
+                                            Slider { enabled: root.style-index == 2; minimum: 0; maximum: 10; value <=> root.usage-penalty; changed => { root.changed(); } }
+                                            Text { text: round(root.usage-penalty * 10) / 10; min-width: 28px; color: Theme.fg; vertical-alignment: center; }
+                                        }
+                                        CheckBox { text: "Try off-centre crops"; checked <=> root.crop-offsets; toggled => { root.changed(); } }
+                                        if root.shape-index > 0: Field {
+                                            label: "Edge tiles";
+                                            Slider { minimum: 0.05; maximum: 1; value <=> root.shape-threshold; changed => { root.changed(); } }
+                                            Text { text: round(root.shape-threshold * 100) + "% in"; min-width: 48px; color: Theme.fg; vertical-alignment: center; }
+                                        }
+                                        Field { label: "Shuffle number"; SpinBox { minimum: 0; maximum: 1000000; value <=> root.seed; edited => { root.changed(); } } }
+                                        PanelHint { text: "These two change how your photos look. Higher values make the picture easier to recognise."; }
+                                        Field {
+                                            label: "Colour correction";
+                                            Slider { minimum: 0; maximum: 0.5; value <=> root.color-correction; changed => { root.changed(); } }
+                                            Text { text: round(root.color-correction * 100) + "%"; min-width: 36px; color: Theme.fg; vertical-alignment: center; }
+                                        }
+                                        Field {
+                                            label: "Blend in picture";
+                                            Slider { minimum: 0; maximum: 0.5; value <=> root.motif-blend; changed => { root.changed(); } }
+                                            Text { text: round(root.motif-blend * 100) + "%"; min-width: 36px; color: Theme.fg; vertical-alignment: center; }
+                                        }
                                     }
                                 }
                             }
@@ -728,16 +764,18 @@ export component AppWindow inherits Window {
                                         LineEdit { text <=> root.custom-h; edited => { root.export-settings-changed(); } }
                                     }
                                     CheckBox { text: "Landscape"; checked <=> root.landscape; toggled => { root.export-settings-changed(); } }
-                                    LinkButton {
-                                        text: (root.export-advanced ? "▾" : "▸") + " Advanced (margins, overlap, DPI, marks)";
-                                        clicked => { root.export-advanced = !root.export-advanced; }
-                                    }
-                                    if root.export-advanced: VerticalLayout {
-                                        spacing: 6px;
-                                        Field { label: "Printer margin (mm)"; LineEdit { text <=> root.margin-mm; edited => { root.export-settings-changed(); } } }
-                                        Field { label: "Glue overlap (mm)"; LineEdit { text <=> root.overlap-mm; edited => { root.export-settings-changed(); } } }
-                                        Field { label: "Print quality (DPI)"; LineEdit { text <=> root.pdf-dpi; edited => { root.export-settings-changed(); } } }
-                                        CheckBox { text: "Crop marks, labels and ruler"; checked <=> root.marks; toggled => { root.export-settings-changed(); } }
+                                    AdvancedPanel {
+                                        text: "margins, overlap, DPI, marks";
+                                        expanded: root.export-advanced;
+                                        tint: Theme.violet;
+                                        toggled => { root.export-advanced = !root.export-advanced; }
+                                        if root.export-advanced: VerticalLayout {
+                                            spacing: 6px;
+                                            Field { label: "Printer margin (mm)"; LineEdit { text <=> root.margin-mm; edited => { root.export-settings-changed(); } } }
+                                            Field { label: "Glue overlap (mm)"; LineEdit { text <=> root.overlap-mm; edited => { root.export-settings-changed(); } } }
+                                            Field { label: "Print quality (DPI)"; LineEdit { text <=> root.pdf-dpi; edited => { root.export-settings-changed(); } } }
+                                            CheckBox { text: "Crop marks, labels and ruler"; checked <=> root.marks; toggled => { root.export-settings-changed(); } }
+                                        }
                                     }
                                 }
                                 if root.export-summary != "": Rectangle {
