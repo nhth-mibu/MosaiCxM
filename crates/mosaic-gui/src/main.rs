@@ -556,7 +556,12 @@ fn autosave(s: &State) -> Result<()> {
 
 /// Scans the given libraries. Returns a short text about the result.
 fn index_libraries(cat: &Catalog, ids: &[i64], job: &Job) -> Result<String> {
-    let (mut added, mut changed, mut removed, mut skipped, mut missing) = (0u64, 0u64, 0u64, 0usize, 0usize);
+    index_libraries_counted(cat, ids, job).map(|(t, _)| t)
+}
+
+/// Like `index_libraries`, also returning how many non-photo files were ignored.
+fn index_libraries_counted(cat: &Catalog, ids: &[i64], job: &Job) -> Result<(String, u64)> {
+    let (mut added, mut changed, mut removed, mut skipped, mut missing, mut ignored) = (0u64, 0u64, 0u64, 0usize, 0usize, 0u64);
     for &id in ids {
         let r = update_library(cat, id, &IndexOptions::default(), job)?;
         added += r.added as u64;
@@ -564,6 +569,7 @@ fn index_libraries(cat: &Catalog, ids: &[i64], job: &Job) -> Result<String> {
         removed += r.removed as u64;
         skipped += r.skipped.len();
         missing += r.roots_missing.len();
+        ignored += r.ignored_other_files;
         if r.cancelled {
             bail!(mosaic_core::job::Cancelled);
         }
@@ -575,19 +581,29 @@ fn index_libraries(cat: &Catalog, ids: &[i64], job: &Job) -> Result<String> {
     if missing > 0 {
         t += &format!(", {missing} folder(s) not found");
     }
-    Ok(t)
+    Ok((t, ignored))
 }
 
 /// Starts a scan of one library (after adding or finding a folder).
 fn scan(ui: &AppWindow, st: &Shared, id: i64) {
     run_job(ui, st, "Scanning photos", move |job, dd| {
         let cat = Catalog::open(&dd)?;
-        let msg = index_libraries(&cat, &[id], job)?;
+        let (msg, ignored) = index_libraries_counted(&cat, &[id], job)?;
         Ok(Box::new(move |ui: &AppWindow, s: &mut State| {
             s.pool = None;
             let _ = refresh_libraries(ui, s);
             update_grid_info(ui, s);
             mark_stale(ui);
+            // A scan of a small folder finishes in a blink. When it finds
+            // nothing, say so plainly instead of leaving the list unchanged.
+            if let Some(l) = s.libs.iter().find(|l| l.id == id) {
+                if l.distinct_photos == 0 {
+                    let other = if ignored > 0 { format!(" {ignored} other files were ignored.") } else { String::new() };
+                    ui.set_notice(
+                        format!("No photos were found in this folder or its subfolders. MosaiCxM reads JPEG, PNG, WebP and TIFF files.{other}").into(),
+                    );
+                }
+            }
             ui.set_status(msg.into());
         }))
     });
