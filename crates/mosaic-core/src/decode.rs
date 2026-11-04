@@ -1,7 +1,8 @@
 //! Image decoding with consistent orientation, colour and alpha handling.
 //!
 //! Rules (identical for indexing, previews and exports):
-//! * Format is detected from file content, not the extension (JPEG, PNG, WebP).
+//! * Format is detected from file content, not the extension (JPEG, PNG, WebP,
+//!   TIFF). 16-bit images are reduced to 8 bits per channel.
 //! * EXIF orientation is applied, so all later coordinates refer to the
 //!   upright image.
 //! * Embedded RGB ICC profiles are converted to sRGB (moxcms). Untagged images
@@ -26,6 +27,7 @@ pub enum Format {
     Jpeg,
     Png,
     WebP,
+    Tiff,
 }
 
 pub fn sniff(bytes: &[u8]) -> Option<Format> {
@@ -35,6 +37,9 @@ pub fn sniff(bytes: &[u8]) -> Option<Format> {
         Some(Format::Png)
     } else if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
         Some(Format::WebP)
+    } else if bytes.len() >= 4 && matches!(&bytes[0..4], b"II*\0" | b"MM\0*" | b"II+\0" | b"MM\0+") {
+        // Classic TIFF and BigTIFF, little- and big-endian.
+        Some(Format::Tiff)
     } else {
         None
     }
@@ -145,6 +150,7 @@ fn decode_generic(bytes: &[u8], f: Format) -> Result<Decoded> {
         Format::Png => image::ImageFormat::Png,
         Format::WebP => image::ImageFormat::WebP,
         Format::Jpeg => image::ImageFormat::Jpeg,
+        Format::Tiff => image::ImageFormat::Tiff,
     });
     let mut limits = image::Limits::default();
     limits.max_alloc = Some(MAX_DECODE_BYTES);
@@ -301,6 +307,83 @@ mod tests {
         let d = decode_bytes(&bytes, None).unwrap();
         assert!(d.info.had_alpha);
         assert_eq!(d.image.get_pixel(0, 0).0, [255, 255, 255]);
+    }
+
+    /// Write a TIFF with the `tiff` crate, optionally tagging Orientation.
+    fn tiff_bytes<C: ::tiff::encoder::colortype::ColorType>(w: u32, h: u32, data: &[C::Inner], orientation: Option<u16>) -> Vec<u8>
+    where
+        [C::Inner]: ::tiff::encoder::TiffValue,
+    {
+        let mut out = Cursor::new(Vec::new());
+        let mut enc = ::tiff::encoder::TiffEncoder::new(&mut out).unwrap();
+        let mut img = enc.new_image::<C>(w, h).unwrap();
+        if let Some(o) = orientation {
+            img.encoder().write_tag(::tiff::tags::Tag::Orientation, o).unwrap();
+        }
+        img.write_data(data).unwrap();
+        out.into_inner()
+    }
+
+    #[test]
+    fn tiff_8bit_rgb() {
+        let img = marker_image();
+        let bytes = tiff_bytes::<::tiff::encoder::colortype::RGB8>(img.width(), img.height(), img.as_raw(), None);
+        assert_eq!(sniff(&bytes), Some(Format::Tiff));
+        let d = decode_bytes(&bytes, None).unwrap();
+        assert_eq!(d.image.dimensions(), img.dimensions());
+        assert_eq!(d.image.get_pixel(4, 4), img.get_pixel(4, 4));
+    }
+
+    #[test]
+    fn tiff_16bit_reduced_to_8bit() {
+        // 0xFFFF red, 0x8080 green, 0 blue.
+        let data: Vec<u16> = (0..16).flat_map(|_| [0xFFFFu16, 0x8080, 0]).collect();
+        let bytes = tiff_bytes::<::tiff::encoder::colortype::RGB16>(4, 4, &data, None);
+        let d = decode_bytes(&bytes, None).unwrap();
+        assert_eq!(d.image.get_pixel(1, 1).0, [255, 128, 0]);
+    }
+
+    #[test]
+    fn tiff_16bit_alpha_composited_over_white() {
+        let data: Vec<u16> = (0..16).flat_map(|_| [0u16, 0, 0, 0]).collect();
+        let bytes = tiff_bytes::<::tiff::encoder::colortype::RGBA16>(4, 4, &data, None);
+        let d = decode_bytes(&bytes, None).unwrap();
+        assert!(d.info.had_alpha);
+        assert_eq!(d.image.get_pixel(0, 0).0, [255, 255, 255]);
+    }
+
+    #[test]
+    fn tiff_orientation_applied() {
+        let img = marker_image();
+        let bytes = tiff_bytes::<::tiff::encoder::colortype::RGB8>(img.width(), img.height(), img.as_raw(), Some(6));
+        let d = decode_bytes(&bytes, None).unwrap();
+        assert_eq!(d.info.exif_orientation, 6);
+        assert_eq!(d.image.dimensions(), (img.height(), img.width()));
+        assert_eq!((d.info.full_width, d.info.full_height), (img.height(), img.width()));
+    }
+
+    #[test]
+    fn tiff_gray16() {
+        let data = vec![0x4000u16; 16];
+        let bytes = tiff_bytes::<::tiff::encoder::colortype::Gray16>(4, 4, &data, None);
+        let d = decode_bytes(&bytes, None).unwrap();
+        assert_eq!(d.image.get_pixel(0, 0).0, [64, 64, 64]);
+    }
+
+    #[test]
+    fn tiff_exif_read_for_stats() {
+        use ::tiff::tags::Tag;
+        let img = marker_image();
+        let mut out = Cursor::new(Vec::new());
+        let mut enc = ::tiff::encoder::TiffEncoder::new(&mut out).unwrap();
+        let mut im = enc.new_image::<::tiff::encoder::colortype::RGB8>(img.width(), img.height()).unwrap();
+        im.encoder().write_tag(Tag::Make, "Nikon").unwrap();
+        im.encoder().write_tag(Tag::Model, "Z 8").unwrap();
+        im.encoder().write_tag(Tag::Artist, "Nhat").unwrap();
+        im.write_data(img.as_raw()).unwrap();
+        let ((artist, _), ex) = crate::indexer::read_exif(&out.into_inner());
+        assert_eq!(artist.as_deref(), Some("Nhat"));
+        assert_eq!(ex.camera.as_deref(), Some("Nikon Z 8"));
     }
 
     #[test]

@@ -54,7 +54,7 @@ You don't need to do anything else. Each time you open the app, it checks your f
 
 ### 2 Picture (coral)
 
-Click **Choose picture…** and pick a JPEG, PNG or WebP image. Faces, animals and pictures with bold shapes and clear colours work best.
+Click **Choose picture…** and pick a JPEG, PNG, WebP or TIFF image. Faces, animals and pictures with bold shapes and clear colours work best.
 
 Not sure which picture to use? Click **Help me choose**. The app tries pictures from a folder you pick, and some of your own photos, and ranks them by how well your photos can rebuild them.
 
