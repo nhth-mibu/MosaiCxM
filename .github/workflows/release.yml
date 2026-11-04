@@ -1,6 +1,6 @@
 name: Release
 
-# Builds the `mosaic` CLI and the `mosaic-gui` desktop app for
+# Builds the `mosaic-gui` desktop app for
 # Windows x64, macOS Apple silicon (.dmg) and Linux x64.
 #
 # - Push a tag like `v0.1.0` to build and publish a GitHub Release.
@@ -73,14 +73,14 @@ jobs:
           key: ${{ matrix.target }}
 
       - name: Build
-        run: cargo build --release --locked --target ${{ matrix.target }} -p mosaic -p mosaic-gui
+        run: cargo build --release --locked --target ${{ matrix.target }} -p mosaic-gui
 
       - name: Package (Linux)
         if: runner.os == 'Linux'
         run: |
           name="mosaic-${VERSION}-linux-x64"
           mkdir -p "dist/$name"
-          cp target/${{ matrix.target }}/release/{mosaic,mosaic-gui} README.md "dist/$name/"
+          cp target/${{ matrix.target }}/release/mosaic-gui README.md "dist/$name/"
           tar -C dist -czf "dist/$name.tar.gz" "$name"
           echo "ASSET=dist/$name.tar.gz" >> "$GITHUB_ENV"
 
