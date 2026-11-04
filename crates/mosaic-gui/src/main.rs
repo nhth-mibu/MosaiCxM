@@ -147,6 +147,12 @@ fn selected_ids(st: &State) -> Vec<i64> {
     v
 }
 
+/// Shows the check mark in the status bar when every folder was found and
+/// scanned and at least one photo is indexed. Call after a scan finishes.
+fn mark_indexed(ui: &AppWindow, st: &State, scan_ok: bool) {
+    ui.set_photos_indexed(scan_ok && ui.get_photo_count() > 0 && ui_missing(st) == 0);
+}
+
 fn refresh_libraries(ui: &AppWindow, st: &mut State) -> Result<()> {
     let cat = Catalog::open(&st.data_dir)?;
     st.libs = cat.libraries()?;
@@ -586,6 +592,7 @@ fn index_libraries_counted(cat: &Catalog, ids: &[i64], job: &Job) -> Result<(Str
 
 /// Starts a scan of one library (after adding or finding a folder).
 fn scan(ui: &AppWindow, st: &Shared, id: i64) {
+    ui.set_photos_indexed(false);
     run_job(ui, st, "Scanning photos", move |job, dd| {
         let cat = Catalog::open(&dd)?;
         let (msg, ignored) = index_libraries_counted(&cat, &[id], job)?;
@@ -594,6 +601,7 @@ fn scan(ui: &AppWindow, st: &Shared, id: i64) {
             let _ = refresh_libraries(ui, s);
             update_grid_info(ui, s);
             mark_stale(ui);
+            mark_indexed(ui, s, true);
             // A scan of a small folder finishes in a blink. When it finds
             // nothing, say so plainly instead of leaving the list unchanged.
             if let Some(l) = s.libs.iter().find(|l| l.id == id) {
@@ -659,6 +667,7 @@ fn main() -> Result<()> {
                     }
                 }
                 update_grid_info(ui, s);
+                mark_indexed(ui, s, true);
                 ui.set_status(msg.into());
             }))
         });
@@ -696,6 +705,7 @@ fn main() -> Result<()> {
                 Ok(()) => {
                     s.pool = None;
                     let _ = refresh_libraries(&ui, &mut s);
+                    mark_indexed(&ui, &s, ui.get_photos_indexed());
                     update_grid_info(&ui, &s);
                     mark_stale(&ui);
                     ui.set_status(format!("Removed {} from the list. No photos were deleted.", path.display()).into());

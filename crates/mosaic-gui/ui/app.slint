@@ -380,6 +380,8 @@ export component AppWindow inherits Window {
     in-out property <string> status: "Ready";
     in-out property <float> progress: 0;
     in-out property <bool> progress-known: false;
+    // Last photo scan finished with photos found and no folder missing.
+    in-out property <bool> photos-indexed: false;
 
     callback add-folder();
     callback remove-folder(int);
@@ -1011,6 +1013,19 @@ export component AppWindow inherits Window {
                 }
                 Text { text: root.status; color: Theme.muted; font-size: 12px; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; }
                 if root.busy: Button { text: "Cancel"; clicked => { root.cancel(); } }
+                if !root.busy && root.photos-indexed: HorizontalLayout {
+                    spacing: 6px;
+                    alignment: center;
+                    Rectangle {
+                        width: 18px;
+                        height: 18px;
+                        y: 11px;
+                        border-radius: 9px;
+                        background: Theme.teal;
+                        Text { text: "✓"; color: white; font-size: 12px; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; }
+                    }
+                    Text { text: root.photos-summary + " indexed"; color: Theme.fg; font-size: 12px; vertical-alignment: center; }
+                }
                 Text { text: "Made with Slint"; color: Theme.muted; font-size: 11px; vertical-alignment: center; }
             }
         }
