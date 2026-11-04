@@ -81,6 +81,8 @@ jobs:
           name="mosaic-${VERSION}-linux-x64"
           mkdir -p "dist/$name"
           cp target/${{ matrix.target }}/release/mosaic-gui README.md "dist/$name/"
+          cp crates/mosaic-gui/linux/mosaicxm.desktop crates/mosaic-gui/linux/install.sh "dist/$name/"
+          cp crates/mosaic-gui/ui/icon.png "dist/$name/mosaicxm.png"
           tar -C dist -czf "dist/$name.tar.gz" "$name"
           echo "ASSET=dist/$name.tar.gz" >> "$GITHUB_ENV"
 
@@ -104,14 +106,14 @@ jobs:
           cp "$bin/mosaic-gui" "$app/Contents/MacOS/"
           cp README.md dist/stage/
 
-          # App icon from the UI's PNG.
+          # App icon from the 1024 px master (see scripts/make_icons.py).
           iconset=dist/AppIcon.iconset
           mkdir -p "$iconset"
-          src=crates/mosaic-gui/ui/icon.png
-          sips -z 16 16 "$src" --out "$iconset/icon_16x16.png" >/dev/null
-          sips -z 32 32 "$src" --out "$iconset/icon_16x16@2x.png" >/dev/null
-          sips -z 32 32 "$src" --out "$iconset/icon_32x32.png" >/dev/null
-          cp "$src" "$iconset/icon_32x32@2x.png"
+          src=crates/mosaic-gui/icons/icon-1024.png
+          for px in 16 32 128 256 512; do
+            sips -z $px $px "$src" --out "$iconset/icon_${px}x${px}.png" >/dev/null
+            sips -z $((px*2)) $((px*2)) "$src" --out "$iconset/icon_${px}x${px}@2x.png" >/dev/null
+          done
           iconutil -c icns "$iconset" -o "$app/Contents/Resources/AppIcon.icns"
 
           short="${VERSION#v}"

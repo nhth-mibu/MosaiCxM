@@ -28,7 +28,9 @@ Pushing a tag like `v0.1.0` runs `.github/workflows/release.yml` and publishes a
 
 - `mosaic-<tag>-windows-x64.zip` (`mosaic-gui.exe` only)
 - `mosaic-<tag>-macos-arm64.dmg` (`MosaiCxM.app` only)
-- `mosaic-<tag>-linux-x64.tar.gz` (`mosaic-gui` only)
+- `mosaic-<tag>-linux-x64.tar.gz` (`mosaic-gui`, `install.sh`, desktop file and icon)
+
+The app icon is drawn by `scripts/make_icons.py` (Pillow). Re-run it after changing the design; it rewrites `crates/mosaic-gui/ui/icon.png` and `crates/mosaic-gui/icons/`.
 
 ```bash
 git tag v0.1.0 && git push origin v0.1.0
