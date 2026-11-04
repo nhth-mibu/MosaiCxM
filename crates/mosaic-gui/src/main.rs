@@ -943,18 +943,20 @@ fn main() -> Result<()> {
                         MotifSource::Library { hash } => mosaic_core::catalog::unhex(hash).ok().and_then(|h| cat.locations(&h, &libs).ok()).and_then(|l| l.into_iter().map(|l| l.path).find(|p| p.exists())),
                     };
                     let prev = r.preview.as_ref().and_then(|p| image::open(p).ok()).map(|i| to_image(&i.to_rgb8()));
-                    rows.push((r.label.clone(), path.clone(), format!("{:.0}/100", r.score * 100.0), r.notes.join("; "), prev));
+                    let pic = r.picture.as_ref().map(to_image);
+                    rows.push((r.label.clone(), path.clone(), format!("{:.0}/100", r.score * 100.0), r.notes.join("; "), pic, prev));
                     paths.push(path);
                 }
                 Ok(Box::new(move |ui: &AppWindow, s: &mut State| {
                     s.suggestion_paths = paths;
                     let model: Vec<SuggestionRow> = rows
                         .into_iter()
-                        .map(|(label, path, score, notes, prev)| SuggestionRow {
+                        .map(|(label, path, score, notes, pic, prev)| SuggestionRow {
                             label: label.into(),
                             path: path.map(|p| p.display().to_string()).unwrap_or_default().into(),
                             score: score.into(),
                             notes: notes.into(),
+                            picture: pic.map(Image::from_rgb8).unwrap_or_default(),
                             has_preview: prev.is_some(),
                             preview: prev.map(Image::from_rgb8).unwrap_or_default(),
                         })
