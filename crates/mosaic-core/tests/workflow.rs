@@ -320,6 +320,14 @@ fn motif_from_library_cannot_match_itself() {
     let recs = recommend(&e.cat, &pool, cands, &grid, &s, &RecommendOptions { trials: 2, ..Default::default() }, &Job::default()).unwrap();
     assert!(recs.iter().all(|r| r.excluded_self && r.trial.is_some()));
     assert!(recs.iter().all(|r| r.score < 1.0 && !r.notes.is_empty()));
+    // Every row carries a small picture of the candidate, trial or not.
+    let lib = MotifCandidate::from_pool(&pool, 3, 1);
+    let recs = recommend(&e.cat, &pool, lib, &grid, &s, &RecommendOptions { trials: 0, ..Default::default() }, &Job::default()).unwrap();
+    assert_eq!(recs.len(), 3);
+    for r in &recs {
+        let p = r.picture.as_ref().expect("candidate picture");
+        assert!(p.width().max(p.height()) <= mosaic_core::recommend::PICTURE_THUMB_PX && p.width() > 0);
+    }
 }
 
 #[test]

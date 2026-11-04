@@ -124,6 +124,24 @@ pub struct Recommendation {
     pub notes: Vec<String>,
     pub preview: Option<PathBuf>,
     pub excluded_self: bool,
+    /// Small picture of the candidate itself (long side at most
+    /// [`PICTURE_THUMB_PX`]), so every row can be shown even when no trial
+    /// mosaic was rendered. `None` only when the picture could not be read.
+    #[serde(skip)]
+    pub picture: Option<RgbImage>,
+}
+
+/// Long side (px) of [`Recommendation::picture`].
+pub const PICTURE_THUMB_PX: u32 = 200;
+
+fn picture_thumb(img: &RgbImage) -> RgbImage {
+    let (w, h) = img.dimensions();
+    let m = w.max(h);
+    if m <= PICTURE_THUMB_PX {
+        return img.clone();
+    }
+    let s = PICTURE_THUMB_PX as f64 / m as f64;
+    image::imageops::thumbnail(img, ((w as f64 * s).round() as u32).max(1), ((h as f64 * s).round() as u32).max(1))
 }
 
 struct Loaded {
@@ -250,7 +268,7 @@ pub fn recommend(cat: &Catalog, pool: &Pool, cands: Vec<MotifCandidate>, grid: &
     let mut out = Vec::new();
     let trials = opts.trials.min(screened.len());
     for (i, (c, ld, sc, mut notes)) in screened.into_iter().enumerate() {
-        let mut rec = Recommendation { label: c.label.clone(), source: c.source.clone(), score: sc.score, screen: sc.clone(), trial: None, notes: vec![], preview: None, excluded_self: false };
+        let mut rec = Recommendation { label: c.label.clone(), source: c.source.clone(), score: sc.score, screen: sc.clone(), trial: None, notes: vec![], preview: None, excluded_self: false, picture: ld.as_ref().map(|l| picture_thumb(&l.small)) };
         if let (true, Some(ld)) = (i < trials, ld.as_ref()) {
             job.check()?;
             job.report("trial mosaics", i as u64, trials as u64);

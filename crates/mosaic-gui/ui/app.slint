@@ -44,6 +44,7 @@ export struct SuggestionRow {
     path: string,
     score: string,
     notes: string,
+    picture: image,
     preview: image,
     has-preview: bool,
 }
@@ -959,7 +960,8 @@ export component AppWindow inherits Window {
                                 HorizontalLayout {
                                     padding: 6px;
                                     spacing: 10px;
-                                    Image { source: s.preview; width: 130px; image-fit: contain; }
+                                    Image { source: s.picture; width: 130px; image-fit: contain; }
+                                    if s.has-preview: Image { source: s.preview; width: 130px; image-fit: contain; }
                                     VerticalLayout {
                                         Text { text: s.score + "  " + s.label; font-weight: 600; color: Theme.fg; overflow: elide; }
                                         Hint { text: s.notes; vertical-stretch: 1; }
