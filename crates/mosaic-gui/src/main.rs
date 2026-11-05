@@ -326,6 +326,9 @@ fn update_grid_info(ui: &AppWindow, st: &State) {
                     }
                 }
             }
+            if let Some(h) = crop_hint(ui.get_motif_aspect() as f64, g.width_mm / g.height_mm) {
+                t += &h;
+            }
             ui.set_grid_info(t.into());
             ui.set_size_summary(format!("{:.0} × {:.0} cm · {style}", g.width_mm / 10.0, g.height_mm / 10.0).into());
         }
@@ -391,11 +394,45 @@ fn show_motif(ui: &AppWindow, path: &Path) {
     match mosaic_core::decode::decode_file(path, Some(512)) {
         Ok(d) => {
             ui.set_motif_image(Image::from_rgb8(to_image(&d.image)));
+            ui.set_motif_aspect(d.image.width() as f32 / d.image.height().max(1) as f32);
             ui.set_motif_path(path.display().to_string().into());
             ui.set_motif_name(file_name(path).into());
         }
         Err(e) => report_error(ui, anyhow!("cannot open this picture: {e}")),
     }
+}
+
+/// After a new picture is chosen: if it is portrait and the mosaic size is
+/// landscape (or the other way round), swap width and height. Otherwise the
+/// picture is cropped to the mosaic and loses its top and bottom (or sides).
+fn match_size_to_motif(ui: &AppWindow) {
+    let a = ui.get_motif_aspect() as f64;
+    let (Ok(w), Ok(h)) = (num(ui.get_width_mm(), "Width"), num(ui.get_height_mm(), "Height")) else { return };
+    if a <= 0.0 || w <= 0.0 || h <= 0.0 || (a - 1.0).abs() < 0.05 || w == h || (a > 1.0) == (w > h) {
+        return;
+    }
+    ui.set_width_mm(ui.get_height_mm());
+    ui.set_height_mm(format!("{w}").into());
+    if ui.get_use_grid() {
+        let (c, r) = (ui.get_cols(), ui.get_rows());
+        ui.set_cols(r);
+        ui.set_rows(c);
+    }
+    let kind = if a > 1.0 { "landscape" } else { "portrait" };
+    ui.set_status(format!("The picture is {kind}, so width and height were swapped to fit it.").into());
+}
+
+/// How much of the picture the mosaic leaves out (cover fit), as a hint.
+fn crop_hint(motif_aspect: f64, mosaic_aspect: f64) -> Option<String> {
+    if motif_aspect <= 0.0 || mosaic_aspect <= 0.0 {
+        return None;
+    }
+    let lost = 1.0 - (motif_aspect / mosaic_aspect).min(mosaic_aspect / motif_aspect);
+    if lost < 0.1 {
+        return None;
+    }
+    let side = if motif_aspect < mosaic_aspect { "top and bottom" } else { "left and right" };
+    Some(format!(" The picture has a different shape, so about {:.0}% of it is cut off at the {side}.", lost * 100.0))
 }
 
 fn mark_stale(ui: &AppWindow) {
@@ -877,13 +914,15 @@ fn main() -> Result<()> {
 
     // ---------------- 2 Picture
     {
-        let w = ui.as_weak();
+        let (w, s) = (ui.as_weak(), st.clone());
         ui.on_browse_motif(move || {
             let ui = w.unwrap();
             if let Some(p) = rfd::FileDialog::new().set_title("Choose the picture for your mosaic").add_filter("Images", &["jpg", "jpeg", "png", "webp", "tif", "tiff"]).pick_file() {
                 show_motif(&ui, &p);
+                match_size_to_motif(&ui);
                 mark_stale(&ui);
                 ui.set_open_step(3);
+                update_grid_info(&ui, &s.lock().unwrap());
             }
         });
     }
@@ -978,6 +1017,8 @@ fn main() -> Result<()> {
                 ui.set_main_view(0);
                 ui.set_open_step(3);
                 ui.set_status("Picture chosen. Press Make preview.".into());
+                match_size_to_motif(&ui);
+                update_grid_info(&ui, &s.lock().unwrap());
             }
         });
     }
@@ -1209,4 +1250,18 @@ fn save_manifest(cat: &Catalog, p: &Project, out: &Path) -> Result<String> {
     let csv = out.with_file_name(format!("{stem}-photos-used.csv"));
     let n = write_manifest(cat, p, &csv)?;
     Ok(format!(" List of {n} photos saved to {}.", file_name(&csv)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::crop_hint;
+
+    #[test]
+    fn crop_hint_names_the_cut_side() {
+        // Portrait picture in a landscape mosaic loses top and bottom.
+        assert!(crop_hint(2.0 / 3.0, 4.0 / 3.0).unwrap().contains("50% of it is cut off at the top and bottom"));
+        assert!(crop_hint(1.5, 2.0 / 3.0).unwrap().contains("left and right"));
+        assert!(crop_hint(1.5, 1.45).is_none());
+        assert!(crop_hint(0.0, 1.0).is_none());
+    }
 }
