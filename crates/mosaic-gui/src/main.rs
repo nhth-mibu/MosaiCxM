@@ -663,57 +663,76 @@ fn check_folder(ui: &AppWindow, st: &Shared, path: PathBuf) {
     let st = st.clone();
     // True while this check is still the one on screen.
     let current = move || st.lock().unwrap().check.as_ref().map(|c| c.0) == Some(n);
+    // Thumbnails are decoded on their own thread so the folder walk keeps
+    // going. The first photos found are shown right away, and "Use this
+    // folder" works as soon as one photo is found; the count fills in as the
+    // walk continues.
+    let (tx, rx) = std::sync::mpsc::channel::<PathBuf>();
+    {
+        let (weak, current) = (weak.clone(), current.clone());
+        std::thread::spawn(move || {
+            for p in rx {
+                if !current() {
+                    return;
+                }
+                let Ok(d) = decode_file(&p, Some(CHECK_THUMB_PX)) else { continue };
+                let (w, h) = d.image.dimensions();
+                let side = w.min(h).max(1) as f32;
+                let crop = [(w as f32 - side) / 2.0 / w as f32, (h as f32 - side) / 2.0 / h as f32, side / w as f32, side / h as f32];
+                let Ok(t) = resize_crop(&d.image, crop, CHECK_THUMB_PX, CHECK_THUMB_PX) else { continue };
+                let buf = to_image(&t);
+                let _ = weak.upgrade_in_event_loop(move |ui| {
+                    let m = ui.get_check_thumbs();
+                    if let Some(v) = m.as_any().downcast_ref::<VecModel<Image>>() {
+                        v.push(Image::from_rgb8(buf));
+                    }
+                });
+            }
+        });
+    }
     std::thread::spawn(move || {
-        let mut files = Vec::new();
+        let mut found = 0usize;
         let mut last = Instant::now();
         for entry in walk_images(&path).flatten() {
             if !entry.file_type().is_file() {
                 continue;
             }
             let ext = entry.path().extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase());
-            if ext.is_some_and(|e| IMAGE_EXTENSIONS.contains(&e.as_str())) {
-                files.push(entry.into_path());
+            if !ext.is_some_and(|e| IMAGE_EXTENSIONS.contains(&e.as_str())) {
+                continue;
             }
-            if last.elapsed().as_millis() > 200 {
+            found += 1;
+            if found <= CHECK_THUMBS {
+                let _ = tx.send(entry.into_path());
+            }
+            // Report the first photo at once (enables the button), then every 200 ms.
+            if found == 1 || last.elapsed().as_millis() > 200 {
                 if !current() {
                     return;
                 }
                 last = Instant::now();
-                let found = files.len();
-                let _ = weak.upgrade_in_event_loop(move |ui| ui.set_check_summary(format!("Looking for photos… {} found so far", thousands(found as u64)).into()));
+                let _ = weak.upgrade_in_event_loop(move |ui| {
+                    ui.set_check_count(found as i32);
+                    ui.set_check_summary(format!("Looking for photos… {} found so far. You can use this folder now.", thousands(found as u64)).into());
+                });
             }
         }
-        let total = files.len();
+        drop(tx);
+        if !current() {
+            return;
+        }
+        let total = found;
         let summary = match total {
             0 => "No photos found in this folder or its subfolders. Pick another folder.".to_string(),
             1 => "1 photo found (subfolders included).".to_string(),
             t if t <= CHECK_THUMBS => format!("{} photos found (subfolders included).", thousands(t as u64)),
-            t => format!("{} photos found (subfolders included). Showing {CHECK_THUMBS} of them.", thousands(t as u64)),
+            t => format!("{} photos found (subfolders included). Showing the first {CHECK_THUMBS}.", thousands(t as u64)),
         };
         let _ = weak.upgrade_in_event_loop(move |ui| {
             ui.set_check_count(total as i32);
             ui.set_check_summary(summary.into());
             ui.set_check_done(true);
         });
-        // Spread the samples over the whole folder, not just the first files.
-        let picks: Vec<&PathBuf> = if total <= CHECK_THUMBS { files.iter().collect() } else { (0..CHECK_THUMBS).map(|i| &files[i * total / CHECK_THUMBS]).collect() };
-        for p in picks {
-            if !current() {
-                return;
-            }
-            let Ok(d) = decode_file(p, Some(CHECK_THUMB_PX)) else { continue };
-            let (w, h) = d.image.dimensions();
-            let side = w.min(h).max(1) as f32;
-            let crop = [(w as f32 - side) / 2.0 / w as f32, (h as f32 - side) / 2.0 / h as f32, side / w as f32, side / h as f32];
-            let Ok(t) = resize_crop(&d.image, crop, CHECK_THUMB_PX, CHECK_THUMB_PX) else { continue };
-            let buf = to_image(&t);
-            let _ = weak.upgrade_in_event_loop(move |ui| {
-                let m = ui.get_check_thumbs();
-                if let Some(v) = m.as_any().downcast_ref::<VecModel<Image>>() {
-                    v.push(Image::from_rgb8(buf));
-                }
-            });
-        }
     });
 }
 
