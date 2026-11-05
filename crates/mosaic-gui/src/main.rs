@@ -31,6 +31,8 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+mod zoom;
+
 slint::include_modules!();
 
 /// Name of the collection that folders are added to when the user has not
@@ -63,6 +65,14 @@ struct State {
     /// Folder being checked before it is added: (check number, path).
     check: Option<(u64, PathBuf)>,
     check_counter: u64,
+    /// Photos for the sharp zoomed-in preview of the current project.
+    zoom: Option<Arc<zoom::ZoomSource>>,
+    /// Width of the normal preview image in pixels.
+    preview_w: u32,
+    /// Running sharp render, and a counter so late results are dropped.
+    zoom_job: Option<Job>,
+    zoom_gen: u64,
+    zoom_plan: Option<zoom::Plan>,
 }
 
 type Shared = Arc<Mutex<State>>;
@@ -411,15 +421,19 @@ fn match_size_to_motif(ui: &AppWindow) {
     if a <= 0.0 || w <= 0.0 || h <= 0.0 || (a - 1.0).abs() < 0.05 || w == h || (a > 1.0) == (w > h) {
         return;
     }
-    ui.set_width_mm(ui.get_height_mm());
-    ui.set_height_mm(format!("{w}").into());
-    if ui.get_use_grid() {
-        let (c, r) = (ui.get_cols(), ui.get_rows());
-        ui.set_cols(r);
-        ui.set_rows(c);
-    }
+    swap_size(ui);
     let kind = if a > 1.0 { "landscape" } else { "portrait" };
     ui.set_status(format!("The picture is {kind}, so width and height were swapped to fit it.").into());
+}
+
+/// Swaps width and height (and exact columns and rows): portrait ↔ landscape.
+fn swap_size(ui: &AppWindow) {
+    let (w, h) = (ui.get_width_mm(), ui.get_height_mm());
+    ui.set_width_mm(h);
+    ui.set_height_mm(w);
+    let (c, r) = (ui.get_cols(), ui.get_rows());
+    ui.set_cols(r);
+    ui.set_rows(c);
 }
 
 /// How much of the picture the mosaic leaves out (cover fit), as a hint.
@@ -521,6 +535,7 @@ fn show_project(ui: &AppWindow, s: &mut State, p: Project, buf: SharedPixelBuffe
         rep += &format!("\nAdjusted: colour correction {:.0}%, picture blend {:.0}% (changes how your photos look).", p.settings.color_correction * 100.0, p.settings.motif_blend * 100.0);
     }
     ui.set_match_report(rep.into());
+    s.preview_w = buf.width();
     ui.set_preview_image(Image::from_rgb8(buf));
     ui.set_has_preview(true);
     ui.set_preview_stale(false);
@@ -528,9 +543,86 @@ fn show_project(ui: &AppWindow, s: &mut State, p: Project, buf: SharedPixelBuffe
     ui.set_stats_summary(format!("{} photos", thousands(st.distinct_used as u64)).into());
     ui.set_has_stats(false);
     s.stats = None;
-    s.project = Some(Arc::new(p));
+    let p = Arc::new(p);
+    reset_zoom(ui, s, &p);
+    s.project = Some(p);
     update_grid_info(ui, s);
     update_export_summary(ui, s);
+}
+
+/// Shows the new preview zoomed out and gets its photos ready for zooming in.
+fn reset_zoom(ui: &AppWindow, s: &mut State, p: &Arc<Project>) {
+    if let Some(j) = s.zoom_job.take() {
+        j.cancel();
+    }
+    s.zoom_gen += 1;
+    s.zoom_plan = None;
+    ui.set_preview_zoom(1.0);
+    ui.set_preview_cx(0.5);
+    ui.set_preview_cy(0.5);
+    ui.set_preview_has_detail(false);
+    ui.set_preview_sharpening(false);
+    ui.set_preview_hover_label("".into());
+    // Zoom in until about two tiles fill the view.
+    ui.set_preview_max_zoom((p.grid.cols.max(p.grid.rows) as f32 / 2.0).max(4.0));
+    let src = Arc::new(zoom::ZoomSource::new(p.clone(), s.data_dir.clone()));
+    s.zoom = Some(src.clone());
+    // Find the original files now, so the first zoom is quick.
+    std::thread::spawn(move || {
+        src.paths();
+    });
+}
+
+/// Renders the visible part of a zoomed-in preview sharply.
+fn sharpen_preview(ui: &AppWindow, st: &Shared, view: zoom::View) {
+    let mut s = st.lock().unwrap();
+    let Some(src) = s.zoom.clone() else { return };
+    let Some(plan) = zoom::plan(src.project.grid.cols, &view, s.preview_w) else {
+        if let Some(j) = s.zoom_job.take() {
+            j.cancel();
+        }
+        s.zoom_gen += 1;
+        s.zoom_plan = None;
+        ui.set_preview_has_detail(false);
+        ui.set_preview_sharpening(false);
+        return;
+    };
+    if s.zoom_plan == Some(plan) {
+        return;
+    }
+    if let Some(j) = s.zoom_job.take() {
+        j.cancel();
+    }
+    s.zoom_gen += 1;
+    s.zoom_plan = Some(plan);
+    let ticket = s.zoom_gen;
+    let job = Job::default();
+    s.zoom_job = Some(job.clone());
+    ui.set_preview_sharpening(true);
+    let (weak, st) = (ui.as_weak(), st.clone());
+    std::thread::spawn(move || {
+        let r = src.render(&plan, &job);
+        let _ = weak.upgrade_in_event_loop(move |ui| {
+            let mut s = st.lock().unwrap();
+            if s.zoom_gen != ticket {
+                return;
+            }
+            s.zoom_job = None;
+            ui.set_preview_sharpening(false);
+            match r {
+                Ok((buf, w, h)) => {
+                    ui.set_preview_detail(Image::from_rgb8(SharedPixelBuffer::clone_from_slice(&buf, w, h)));
+                    ui.set_preview_detail_uv(ModelRc::new(VecModel::from(plan.uv().to_vec())));
+                    ui.set_preview_has_detail(true);
+                }
+                Err(e) if is_cancelled(&e) => {}
+                Err(e) => {
+                    s.zoom_plan = None;
+                    ui.set_status(format!("Could not load sharp photos: {e:#}").into());
+                }
+            }
+        });
+    });
 }
 
 fn bars(items: &[(String, u64)]) -> Vec<Bar> {
@@ -658,57 +750,76 @@ fn check_folder(ui: &AppWindow, st: &Shared, path: PathBuf) {
     let st = st.clone();
     // True while this check is still the one on screen.
     let current = move || st.lock().unwrap().check.as_ref().map(|c| c.0) == Some(n);
+    // Thumbnails are decoded on their own thread so the folder walk keeps
+    // going. The first photos found are shown right away, and "Use this
+    // folder" works as soon as one photo is found; the count fills in as the
+    // walk continues.
+    let (tx, rx) = std::sync::mpsc::channel::<PathBuf>();
+    {
+        let (weak, current) = (weak.clone(), current.clone());
+        std::thread::spawn(move || {
+            for p in rx {
+                if !current() {
+                    return;
+                }
+                let Ok(d) = decode_file(&p, Some(CHECK_THUMB_PX)) else { continue };
+                let (w, h) = d.image.dimensions();
+                let side = w.min(h).max(1) as f32;
+                let crop = [(w as f32 - side) / 2.0 / w as f32, (h as f32 - side) / 2.0 / h as f32, side / w as f32, side / h as f32];
+                let Ok(t) = resize_crop(&d.image, crop, CHECK_THUMB_PX, CHECK_THUMB_PX) else { continue };
+                let buf = to_image(&t);
+                let _ = weak.upgrade_in_event_loop(move |ui| {
+                    let m = ui.get_check_thumbs();
+                    if let Some(v) = m.as_any().downcast_ref::<VecModel<Image>>() {
+                        v.push(Image::from_rgb8(buf));
+                    }
+                });
+            }
+        });
+    }
     std::thread::spawn(move || {
-        let mut files = Vec::new();
+        let mut found = 0usize;
         let mut last = Instant::now();
         for entry in walk_images(&path).flatten() {
             if !entry.file_type().is_file() {
                 continue;
             }
             let ext = entry.path().extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase());
-            if ext.is_some_and(|e| IMAGE_EXTENSIONS.contains(&e.as_str())) {
-                files.push(entry.into_path());
+            if !ext.is_some_and(|e| IMAGE_EXTENSIONS.contains(&e.as_str())) {
+                continue;
             }
-            if last.elapsed().as_millis() > 200 {
+            found += 1;
+            if found <= CHECK_THUMBS {
+                let _ = tx.send(entry.into_path());
+            }
+            // Report the first photo at once (enables the button), then every 200 ms.
+            if found == 1 || last.elapsed().as_millis() > 200 {
                 if !current() {
                     return;
                 }
                 last = Instant::now();
-                let found = files.len();
-                let _ = weak.upgrade_in_event_loop(move |ui| ui.set_check_summary(format!("Looking for photos… {} found so far", thousands(found as u64)).into()));
+                let _ = weak.upgrade_in_event_loop(move |ui| {
+                    ui.set_check_count(found as i32);
+                    ui.set_check_summary(format!("Looking for photos… {} found so far. You can use this folder now.", thousands(found as u64)).into());
+                });
             }
         }
-        let total = files.len();
+        drop(tx);
+        if !current() {
+            return;
+        }
+        let total = found;
         let summary = match total {
             0 => "No photos found in this folder or its subfolders. Pick another folder.".to_string(),
             1 => "1 photo found (subfolders included).".to_string(),
             t if t <= CHECK_THUMBS => format!("{} photos found (subfolders included).", thousands(t as u64)),
-            t => format!("{} photos found (subfolders included). Showing {CHECK_THUMBS} of them.", thousands(t as u64)),
+            t => format!("{} photos found (subfolders included). Showing the first {CHECK_THUMBS}.", thousands(t as u64)),
         };
         let _ = weak.upgrade_in_event_loop(move |ui| {
             ui.set_check_count(total as i32);
             ui.set_check_summary(summary.into());
             ui.set_check_done(true);
         });
-        // Spread the samples over the whole folder, not just the first files.
-        let picks: Vec<&PathBuf> = if total <= CHECK_THUMBS { files.iter().collect() } else { (0..CHECK_THUMBS).map(|i| &files[i * total / CHECK_THUMBS]).collect() };
-        for p in picks {
-            if !current() {
-                return;
-            }
-            let Ok(d) = decode_file(p, Some(CHECK_THUMB_PX)) else { continue };
-            let (w, h) = d.image.dimensions();
-            let side = w.min(h).max(1) as f32;
-            let crop = [(w as f32 - side) / 2.0 / w as f32, (h as f32 - side) / 2.0 / h as f32, side / w as f32, side / h as f32];
-            let Ok(t) = resize_crop(&d.image, crop, CHECK_THUMB_PX, CHECK_THUMB_PX) else { continue };
-            let buf = to_image(&t);
-            let _ = weak.upgrade_in_event_loop(move |ui| {
-                let m = ui.get_check_thumbs();
-                if let Some(v) = m.as_any().downcast_ref::<VecModel<Image>>() {
-                    v.push(Image::from_rgb8(buf));
-                }
-            });
-        }
     });
 }
 
@@ -1032,6 +1143,10 @@ fn main() -> Result<()> {
         });
     }
     {
+        let w = ui.as_weak();
+        ui.on_swap_size(move || swap_size(&w.unwrap()));
+    }
+    {
         let (w, s) = (ui.as_weak(), st.clone());
         ui.on_settings_changed(move || {
             let ui = w.unwrap();
@@ -1105,6 +1220,49 @@ fn main() -> Result<()> {
                     ui.set_project_name(file_name(&path).into());
                 }))
             });
+        });
+    }
+
+    // Zoomable preview: render sharply once the view has stopped moving.
+    {
+        let (w, s) = (ui.as_weak(), st.clone());
+        let timer = Rc::new(slint::Timer::default());
+        ui.on_preview_view_changed(move |_zoom, cx, cy, iw, ih, vw, vh| {
+            let ui = w.unwrap();
+            let view = zoom::View {
+                cx: cx as f64,
+                cy: cy as f64,
+                img_w: iw as f64,
+                img_h: ih as f64,
+                view_w: vw as f64,
+                view_h: vh as f64,
+                scale: ui.window().scale_factor() as f64,
+            };
+            let (w, s) = (w.clone(), s.clone());
+            timer.start(slint::TimerMode::SingleShot, std::time::Duration::from_millis(200), move || {
+                if let Some(ui) = w.upgrade() {
+                    sharpen_preview(&ui, &s, view);
+                }
+            });
+        });
+    }
+    {
+        let (w, s) = (ui.as_weak(), st.clone());
+        ui.on_preview_hover(move |u, v| {
+            let ui = w.unwrap();
+            let s = s.lock().unwrap();
+            let label = s
+                .zoom
+                .as_ref()
+                .and_then(|z| {
+                    let i = zoom::tile_at(&z.project, u as f64, v as f64)?;
+                    let photo = z.project.tiles[i].photo as usize;
+                    Some(z.known_path(photo).map(|p| file_name(p)).unwrap_or_else(|| format!("Photo {}", photo + 1)))
+                })
+                .unwrap_or_default();
+            if ui.get_preview_hover_label() != label.as_str() {
+                ui.set_preview_hover_label(label.into());
+            }
         });
     }
 

@@ -72,6 +72,8 @@ Not sure which picture to use? Click **Help me choose**. The app tries pictures 
 
 Click **Make preview**. This can take from a few seconds to a minute with very large photo collections. When you change something, the app shows **"Settings changed since this preview"**; click **Update preview** to see the new result.
 
+To look closer, scroll or double-click the preview, and drag to move around. When you stop, the app loads the photos you see from the original files, so each one is sharp, and shows the file name of the photo under the mouse. Use **−**, **+** and the zoom percentage (click it to see the whole mosaic again) in the corner.
+
 Under the preview you can see how many different photos were used and how far away the mosaic looks best. Your work is saved automatically and opens again next time you start the app. Use **Save as…** at the top to keep a copy with its own name.
 
 Want more control? Open **Advanced** for the grid, how often each photo may be used, colour correction and more.

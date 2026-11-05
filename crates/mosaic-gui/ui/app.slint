@@ -178,6 +178,36 @@ component TipCheck inherits Tipped {
     HelpDot { }
 }
 
+// Small square button with up/down arrows: swaps width and height.
+component SwapButton inherits Rectangle {
+    in property <string> tooltip-text;
+    callback clicked();
+    width: 32px;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: Theme.line;
+    background: ta.pressed ? Theme.line : ta.has-hover ? Theme.surface.darker(0.05) : Theme.surface;
+    accessible-role: button;
+    accessible-label: root.tooltip-text;
+    accessible-action-default => { root.clicked(); }
+    Path {
+        width: 16px;
+        height: 22px;
+        viewbox-width: 16;
+        viewbox-height: 22;
+        stroke: Theme.fg;
+        stroke-width: 1.6px;
+        fill: transparent;
+        // Up arrow on the left, down arrow on the right.
+        commands: "M 4 20 L 4 2 M 1 5 L 4 2 L 7 5 M 12 2 L 12 20 M 9 17 L 12 20 L 15 17";
+    }
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+    Tooltip { TipBox { text: root.tooltip-text; } }
+}
+
 // Filled button in a step colour.
 component ColorButton inherits Rectangle {
     in property <string> text;
@@ -410,6 +440,172 @@ component Spinner inherits Rectangle {
     }
 }
 
+// Small button drawn over the preview.
+component OverlayButton inherits Rectangle {
+    in property <string> text;
+    in property <string> tip;
+    in property <bool> enabled: true;
+    callback clicked();
+    width: max(30px, t.preferred-width + 18px);
+    height: 30px;
+    border-radius: 7px;
+    background: ta.pressed ? Theme.line : Theme.surface;
+    border-width: 1px;
+    border-color: Theme.line;
+    ta := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: root.enabled ? pointer : default;
+        clicked => { root.clicked(); }
+    }
+    t := Text { text: root.text; color: root.enabled ? Theme.fg : Theme.muted; font-size: 13px; font-weight: 600; }
+    Tooltip { TipBox { text: root.tip; } }
+}
+
+// The mosaic preview. Scroll or double-click to zoom, drag to move.
+// cx and cy are the centre of the view as fractions (0..1) of the mosaic.
+// After the view stops moving, the app sends a sharp image ("detail") of the
+// visible area, made from the original photos, and it is drawn over the
+// scaled-up preview.
+component ZoomView inherits Rectangle {
+    in property <image> base;
+    in property <image> detail;
+    in property <bool> has-detail;
+    in property <[float]> detail-uv: [0, 0, 1, 1];
+    in property <bool> sharpening;
+    in property <string> hover-label;
+    in property <float> max-zoom: 8;
+    in property <float> dim: 1.0;
+    in-out property <float> zoom: 1;
+    in-out property <float> cx: 0.5;
+    in-out property <float> cy: 0.5;
+    // zoom, centre, mosaic size on screen, view size.
+    callback view-changed(float, float, float, length, length, length, length);
+    // Mouse position as fractions of the mosaic.
+    callback hover(float, float);
+    clip: true;
+
+    property <float> aspect: root.base.height > 0 ? root.base.width / (root.base.height * 1.0) : 1;
+    property <length> fit-w: min(root.width, root.height * root.aspect);
+    property <length> img-w: root.fit-w * root.zoom;
+    property <length> img-h: root.fit-w / root.aspect * root.zoom;
+    property <length> img-x: root.width / 2 - root.cx * root.img-w;
+    property <length> img-y: root.height / 2 - root.cy * root.img-h;
+    property <float> press-cx;
+    property <float> press-cy;
+
+    // Keeps the mosaic on screen and tells the app what is visible.
+    function settle() {
+        root.cx = root.img-w <= root.width ? 0.5 : clamp(root.cx, root.width / root.img-w / 2, 1 - root.width / root.img-w / 2);
+        root.cy = root.img-h <= root.height ? 0.5 : clamp(root.cy, root.height / root.img-h / 2, 1 - root.height / root.img-h / 2);
+        root.view-changed(root.zoom, root.cx, root.cy, root.img-w, root.img-h, root.width, root.height);
+        // The photo under the mouse changes when the view moves.
+        if ta.has-hover {
+            root.hover((ta.mouse-x - root.img-x) / root.img-w, (ta.mouse-y - root.img-y) / root.img-h);
+        }
+    }
+    // Zooms by `factor`, keeping the point (px, py) of the view in place.
+    function zoom-at(factor: float, px: length, py: length) {
+        let u = (px - root.img-x) / root.img-w;
+        let v = (py - root.img-y) / root.img-h;
+        root.zoom = clamp(root.zoom * factor, 1, root.max-zoom);
+        root.cx = u + (root.width / 2 - px) / root.img-w;
+        root.cy = v + (root.height / 2 - py) / root.img-h;
+        root.settle();
+    }
+    function fit() {
+        root.zoom = 1;
+        root.cx = 0.5;
+        root.cy = 0.5;
+        root.settle();
+    }
+    changed width => { root.settle(); }
+    changed height => { root.settle(); }
+
+    Image {
+        source: root.base;
+        x: root.img-x;
+        y: root.img-y;
+        width: root.img-w;
+        height: root.img-h;
+        image-fit: fill;
+        opacity: root.dim;
+    }
+    if root.has-detail: Image {
+        source: root.detail;
+        x: root.img-x + root.detail-uv[0] * root.img-w;
+        y: root.img-y + root.detail-uv[1] * root.img-h;
+        width: (root.detail-uv[2] - root.detail-uv[0]) * root.img-w;
+        height: (root.detail-uv[3] - root.detail-uv[1]) * root.img-h;
+        image-fit: fill;
+        opacity: root.dim;
+    }
+    ta := TouchArea {
+        mouse-cursor: self.pressed && root.zoom > 1.001 ? MouseCursor.grabbing : root.zoom > 1.001 ? MouseCursor.grab : MouseCursor.crosshair;
+        pointer-event(e) => {
+            if e.kind == PointerEventKind.down {
+                root.press-cx = root.cx;
+                root.press-cy = root.cy;
+            }
+        }
+        moved => {
+            root.cx = root.press-cx - (self.mouse-x - self.pressed-x) / root.img-w;
+            root.cy = root.press-cy - (self.mouse-y - self.pressed-y) / root.img-h;
+            root.settle();
+        }
+        changed mouse-x => { root.hover((self.mouse-x - root.img-x) / root.img-w, (self.mouse-y - root.img-y) / root.img-h); }
+        changed mouse-y => { root.hover((self.mouse-x - root.img-x) / root.img-w, (self.mouse-y - root.img-y) / root.img-h); }
+        scroll-event(e) => {
+            if e.delta-y == 0 {
+                return reject;
+            }
+            root.zoom-at(Math.pow(1.004, clamp(e.delta-y / 1px, -120, 120)), self.mouse-x, self.mouse-y);
+            accept
+        }
+        double-clicked => {
+            if root.zoom >= root.max-zoom * 0.99 {
+                root.fit();
+            } else {
+                root.zoom-at(3, self.mouse-x, self.mouse-y);
+            }
+        }
+    }
+
+    // Name of the photo under the mouse.
+    if root.zoom > 1.001 && ta.has-hover && root.hover-label != "": Rectangle {
+        x: 10px;
+        y: root.height - self.height - 10px;
+        width: name.preferred-width + 20px;
+        height: 30px;
+        border-radius: 7px;
+        background: #000000b0;
+        name := Text { text: root.hover-label; color: #ffffff; font-size: 12px; }
+    }
+    if root.zoom <= 1.001: Rectangle {
+        x: 10px;
+        y: root.height - self.height - 10px;
+        width: help.preferred-width + 20px;
+        height: 26px;
+        border-radius: 7px;
+        background: #00000080;
+        help := Text { text: "Scroll or double-click to look closer"; color: #ffffff; font-size: 12px; }
+    }
+    HorizontalLayout {
+        x: root.width - self.preferred-width - 10px;
+        y: root.height - 40px;
+        height: 30px;
+        spacing: 6px;
+        if root.sharpening: Rectangle {
+            width: sharp.preferred-width + 20px;
+            border-radius: 7px;
+            background: #000000b0;
+            sharp := Text { text: "Loading sharp photos…"; color: #ffffff; font-size: 12px; }
+        }
+        OverlayButton { text: "−"; tip: "Zoom out."; enabled: root.zoom > 1.001; clicked => { root.zoom-at(1 / 1.6, root.width / 2, root.height / 2); } }
+        OverlayButton { text: round(root.zoom * 100) + "%"; tip: "Show the full mosaic again."; enabled: root.zoom > 1.001; clicked => { root.fit(); } }
+        OverlayButton { text: "+"; tip: "Zoom in. The app then loads the sharp photos."; enabled: root.zoom < root.max-zoom; clicked => { root.zoom-at(1.6, root.width / 2, root.height / 2); } }
+    }
+}
+
 export component AppWindow inherits Window {
     title: "MosaiCxM";
     preferred-width: 1280px;
@@ -481,6 +677,15 @@ export component AppWindow inherits Window {
     in-out property <image> preview-image;
     in-out property <bool> has-preview: false;
     in-out property <bool> preview-stale: false;
+    in-out property <float> preview-zoom: 1;
+    in-out property <float> preview-cx: 0.5;
+    in-out property <float> preview-cy: 0.5;
+    in-out property <float> preview-max-zoom: 8;
+    in-out property <image> preview-detail;
+    in-out property <bool> preview-has-detail: false;
+    in-out property <[float]> preview-detail-uv: [0, 0, 1, 1];
+    in-out property <bool> preview-sharpening: false;
+    in-out property <string> preview-hover-label;
     in-out property <string> chip-photos;
     in-out property <string> chip-distance;
     in-out property <string> chip-repeats;
@@ -530,6 +735,7 @@ export component AppWindow inherits Window {
             notes: [
                 "Point at a control and wait a moment. A tooltip tells you what the control does. A small ? next to a name shows that it has a tooltip.",
                 "The app saves your work automatically. When you start the app again, it opens your last mosaic.",
+                "To look closer at the preview, scroll or double-click it. Drag it to move. Click the percentage to see the full mosaic again.",
                 "To keep a mosaic as a file, click Save as…. To use it again, click Open….",
                 "When you change a setting, the preview shows \"Settings changed since this preview\". Click Update preview to see the change.",
             ],
@@ -578,7 +784,7 @@ export component AppWindow inherits Window {
             picture: @image-url("help/size.png"),
             intro: "This step sets the size of the mosaic, the size of each tile, and how the app selects the photos.",
             steps: [
-                "Type the width and the height of the mosaic in millimetres.",
+                "Type the width and the height of the mosaic in millimetres. To change between portrait and landscape, click the arrow button.",
                 "Type the tile size in millimetres.",
                 "If you do not want a rectangle, select a shape.",
                 "Select a style: Sharp, Balanced or Varied.",
@@ -682,6 +888,7 @@ export component AppWindow inherits Window {
     callback show-skipped();
 
     callback browse-motif();
+    callback swap-size();
     callback browse-shape();
     callback browse-suggest-folder();
     callback suggest();
@@ -692,6 +899,8 @@ export component AppWindow inherits Window {
     callback generate();
     callback save-project();
     callback open-project();
+    callback preview-view-changed(float, float, float, length, length, length, length);
+    callback preview-hover(float, float);
 
     callback export-settings-changed();
     callback export();
@@ -903,8 +1112,22 @@ export component AppWindow inherits Window {
                             }
                             if root.open-step == 3: VerticalLayout {
                                 spacing: 8px;
-                                Field { label: "Width (mm)"; tip: "The width of the finished mosaic in millimetres. 1000 mm is 1 metre."; LineEdit { text <=> root.width-mm; edited => { root.changed(); } } }
-                                Field { label: "Height (mm)"; tip: "The height of the finished mosaic in millimetres."; LineEdit { text <=> root.height-mm; edited => { root.changed(); } } }
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    VerticalLayout {
+                                        spacing: 8px;
+                                        horizontal-stretch: 1;
+                                        Field { label: "Width (mm)"; tip: "The width of the finished mosaic in millimetres. 1000 mm is 1 metre."; LineEdit { min-width: 80px; text <=> root.width-mm; edited => { root.changed(); } } }
+                                        Field { label: "Height (mm)"; tip: "The height of the finished mosaic in millimetres."; LineEdit { min-width: 80px; text <=> root.height-mm; edited => { root.changed(); } } }
+                                    }
+                                    SwapButton {
+                                        tooltip-text: "Swap the width and the height. This changes the mosaic from portrait to landscape, or from landscape to portrait.";
+                                        clicked => {
+                                            root.swap-size();
+                                            root.changed();
+                                        }
+                                    }
+                                }
                                 if !root.use-grid: Field { label: "Tile size (mm)"; tip: "The size of each small photo. Small tiles show more detail, but you need more photos. Big tiles look good from far away."; LineEdit { text <=> root.tile-mm; edited => { root.changed(); } } }
                                 Field {
                                     label: "Shape";
@@ -1181,12 +1404,24 @@ export component AppWindow inherits Window {
                         border-radius: 10px;
                         border-width: 1px;
                         border-color: Theme.line;
-                        if root.has-preview: Image {
-                            source: root.preview-image;
-                            image-fit: contain;
+                        if root.has-preview: ZoomView {
+                            x: 8px;
+                            y: 8px;
                             width: parent.width - 16px;
                             height: parent.height - 16px;
-                            opacity: root.preview-stale ? 0.7 : 1.0;
+                            base: root.preview-image;
+                            detail: root.preview-detail;
+                            has-detail: root.preview-has-detail;
+                            detail-uv: root.preview-detail-uv;
+                            sharpening: root.preview-sharpening;
+                            hover-label: root.preview-hover-label;
+                            max-zoom: root.preview-max-zoom;
+                            dim: root.preview-stale ? 0.7 : 1.0;
+                            zoom <=> root.preview-zoom;
+                            cx <=> root.preview-cx;
+                            cy <=> root.preview-cy;
+                            view-changed(z, x, y, iw, ih, vw, vh) => { root.preview-view-changed(z, x, y, iw, ih, vw, vh); }
+                            hover(u, v) => { root.preview-hover(u, v); }
                         }
                         if !root.has-preview: VerticalLayout {
                             alignment: center;
