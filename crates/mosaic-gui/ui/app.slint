@@ -98,6 +98,35 @@ component Field inherits HorizontalLayout {
     @children
 }
 
+// Small square button with up/down arrows: swaps width and height.
+component SwapButton inherits Rectangle {
+    in property <string> tooltip-text;
+    callback clicked();
+    width: 32px;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: Theme.line;
+    background: ta.pressed ? Theme.line : ta.has-hover ? Theme.surface.darker(0.05) : Theme.surface;
+    accessible-role: button;
+    accessible-label: root.tooltip-text;
+    accessible-action-default => { root.clicked(); }
+    Path {
+        width: 16px;
+        height: 22px;
+        viewbox-width: 16;
+        viewbox-height: 22;
+        stroke: Theme.fg;
+        stroke-width: 1.6px;
+        fill: transparent;
+        // Up arrow on the left, down arrow on the right.
+        commands: "M 4 20 L 4 2 M 1 5 L 4 2 L 7 5 M 12 2 L 12 20 M 9 17 L 12 20 L 15 17";
+    }
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
 // Filled button in a step colour.
 component ColorButton inherits Rectangle {
     in property <string> text;
@@ -451,6 +480,7 @@ export component AppWindow inherits Window {
     callback show-skipped();
 
     callback browse-motif();
+    callback swap-size();
     callback browse-shape();
     callback browse-suggest-folder();
     callback suggest();
@@ -658,8 +688,22 @@ export component AppWindow inherits Window {
                             }
                             if root.open-step == 3: VerticalLayout {
                                 spacing: 8px;
-                                Field { label: "Width (mm)"; LineEdit { text <=> root.width-mm; edited => { root.changed(); } } }
-                                Field { label: "Height (mm)"; LineEdit { text <=> root.height-mm; edited => { root.changed(); } } }
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    VerticalLayout {
+                                        spacing: 8px;
+                                        horizontal-stretch: 1;
+                                        Field { label: "Width (mm)"; LineEdit { min-width: 80px; text <=> root.width-mm; edited => { root.changed(); } } }
+                                        Field { label: "Height (mm)"; LineEdit { min-width: 80px; text <=> root.height-mm; edited => { root.changed(); } } }
+                                    }
+                                    SwapButton {
+                                        tooltip-text: "Swap width and height (portrait / landscape)";
+                                        clicked => {
+                                            root.swap-size();
+                                            root.changed();
+                                        }
+                                    }
+                                }
                                 if !root.use-grid: Field { label: "Tile size (mm)"; LineEdit { text <=> root.tile-mm; edited => { root.changed(); } } }
                                 Field {
                                     label: "Shape";

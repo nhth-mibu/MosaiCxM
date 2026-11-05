@@ -411,15 +411,19 @@ fn match_size_to_motif(ui: &AppWindow) {
     if a <= 0.0 || w <= 0.0 || h <= 0.0 || (a - 1.0).abs() < 0.05 || w == h || (a > 1.0) == (w > h) {
         return;
     }
-    ui.set_width_mm(ui.get_height_mm());
-    ui.set_height_mm(format!("{w}").into());
-    if ui.get_use_grid() {
-        let (c, r) = (ui.get_cols(), ui.get_rows());
-        ui.set_cols(r);
-        ui.set_rows(c);
-    }
+    swap_size(ui);
     let kind = if a > 1.0 { "landscape" } else { "portrait" };
     ui.set_status(format!("The picture is {kind}, so width and height were swapped to fit it.").into());
+}
+
+/// Swaps width and height (and exact columns and rows): portrait ↔ landscape.
+fn swap_size(ui: &AppWindow) {
+    let (w, h) = (ui.get_width_mm(), ui.get_height_mm());
+    ui.set_width_mm(h);
+    ui.set_height_mm(w);
+    let (c, r) = (ui.get_cols(), ui.get_rows());
+    ui.set_cols(r);
+    ui.set_rows(c);
 }
 
 /// How much of the picture the mosaic leaves out (cover fit), as a hint.
@@ -1031,6 +1035,10 @@ fn main() -> Result<()> {
             apply_style(&ui, i);
             update_grid_info(&ui, &s.lock().unwrap());
         });
+    }
+    {
+        let w = ui.as_weak();
+        ui.on_swap_size(move || swap_size(&w.unwrap()));
     }
     {
         let (w, s) = (ui.as_weak(), st.clone());
