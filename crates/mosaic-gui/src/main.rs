@@ -31,6 +31,8 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+mod zoom;
+
 slint::include_modules!();
 
 /// Name of the collection that folders are added to when the user has not
@@ -62,6 +64,14 @@ struct State {
     /// Folder being checked before it is added: (check number, path).
     check: Option<(u64, PathBuf)>,
     check_counter: u64,
+    /// Photos for the sharp zoomed-in preview of the current project.
+    zoom: Option<Arc<zoom::ZoomSource>>,
+    /// Width of the normal preview image in pixels.
+    preview_w: u32,
+    /// Running sharp render, and a counter so late results are dropped.
+    zoom_job: Option<Job>,
+    zoom_gen: u64,
+    zoom_plan: Option<zoom::Plan>,
 }
 
 type Shared = Arc<Mutex<State>>;
@@ -522,6 +532,7 @@ fn show_project(ui: &AppWindow, s: &mut State, p: Project, buf: SharedPixelBuffe
         rep += &format!("\nAdjusted: colour correction {:.0}%, picture blend {:.0}% (changes how your photos look).", p.settings.color_correction * 100.0, p.settings.motif_blend * 100.0);
     }
     ui.set_match_report(rep.into());
+    s.preview_w = buf.width();
     ui.set_preview_image(Image::from_rgb8(buf));
     ui.set_has_preview(true);
     ui.set_preview_stale(false);
@@ -529,9 +540,86 @@ fn show_project(ui: &AppWindow, s: &mut State, p: Project, buf: SharedPixelBuffe
     ui.set_stats_summary(format!("{} photos", thousands(st.distinct_used as u64)).into());
     ui.set_has_stats(false);
     s.stats = None;
-    s.project = Some(Arc::new(p));
+    let p = Arc::new(p);
+    reset_zoom(ui, s, &p);
+    s.project = Some(p);
     update_grid_info(ui, s);
     update_export_summary(ui, s);
+}
+
+/// Shows the new preview zoomed out and gets its photos ready for zooming in.
+fn reset_zoom(ui: &AppWindow, s: &mut State, p: &Arc<Project>) {
+    if let Some(j) = s.zoom_job.take() {
+        j.cancel();
+    }
+    s.zoom_gen += 1;
+    s.zoom_plan = None;
+    ui.set_preview_zoom(1.0);
+    ui.set_preview_cx(0.5);
+    ui.set_preview_cy(0.5);
+    ui.set_preview_has_detail(false);
+    ui.set_preview_sharpening(false);
+    ui.set_preview_hover_label("".into());
+    // Zoom in until about two tiles fill the view.
+    ui.set_preview_max_zoom((p.grid.cols.max(p.grid.rows) as f32 / 2.0).max(4.0));
+    let src = Arc::new(zoom::ZoomSource::new(p.clone(), s.data_dir.clone()));
+    s.zoom = Some(src.clone());
+    // Find the original files now, so the first zoom is quick.
+    std::thread::spawn(move || {
+        src.paths();
+    });
+}
+
+/// Renders the visible part of a zoomed-in preview sharply.
+fn sharpen_preview(ui: &AppWindow, st: &Shared, view: zoom::View) {
+    let mut s = st.lock().unwrap();
+    let Some(src) = s.zoom.clone() else { return };
+    let Some(plan) = zoom::plan(src.project.grid.cols, &view, s.preview_w) else {
+        if let Some(j) = s.zoom_job.take() {
+            j.cancel();
+        }
+        s.zoom_gen += 1;
+        s.zoom_plan = None;
+        ui.set_preview_has_detail(false);
+        ui.set_preview_sharpening(false);
+        return;
+    };
+    if s.zoom_plan == Some(plan) {
+        return;
+    }
+    if let Some(j) = s.zoom_job.take() {
+        j.cancel();
+    }
+    s.zoom_gen += 1;
+    s.zoom_plan = Some(plan);
+    let ticket = s.zoom_gen;
+    let job = Job::default();
+    s.zoom_job = Some(job.clone());
+    ui.set_preview_sharpening(true);
+    let (weak, st) = (ui.as_weak(), st.clone());
+    std::thread::spawn(move || {
+        let r = src.render(&plan, &job);
+        let _ = weak.upgrade_in_event_loop(move |ui| {
+            let mut s = st.lock().unwrap();
+            if s.zoom_gen != ticket {
+                return;
+            }
+            s.zoom_job = None;
+            ui.set_preview_sharpening(false);
+            match r {
+                Ok((buf, w, h)) => {
+                    ui.set_preview_detail(Image::from_rgb8(SharedPixelBuffer::clone_from_slice(&buf, w, h)));
+                    ui.set_preview_detail_uv(ModelRc::new(VecModel::from(plan.uv().to_vec())));
+                    ui.set_preview_has_detail(true);
+                }
+                Err(e) if is_cancelled(&e) => {}
+                Err(e) => {
+                    s.zoom_plan = None;
+                    ui.set_status(format!("Could not load sharp photos: {e:#}").into());
+                }
+            }
+        });
+    });
 }
 
 fn bars(items: &[(String, u64)]) -> Vec<Bar> {
@@ -1106,6 +1194,49 @@ fn main() -> Result<()> {
                     ui.set_project_name(file_name(&path).into());
                 }))
             });
+        });
+    }
+
+    // Zoomable preview: render sharply once the view has stopped moving.
+    {
+        let (w, s) = (ui.as_weak(), st.clone());
+        let timer = Rc::new(slint::Timer::default());
+        ui.on_preview_view_changed(move |_zoom, cx, cy, iw, ih, vw, vh| {
+            let ui = w.unwrap();
+            let view = zoom::View {
+                cx: cx as f64,
+                cy: cy as f64,
+                img_w: iw as f64,
+                img_h: ih as f64,
+                view_w: vw as f64,
+                view_h: vh as f64,
+                scale: ui.window().scale_factor() as f64,
+            };
+            let (w, s) = (w.clone(), s.clone());
+            timer.start(slint::TimerMode::SingleShot, std::time::Duration::from_millis(200), move || {
+                if let Some(ui) = w.upgrade() {
+                    sharpen_preview(&ui, &s, view);
+                }
+            });
+        });
+    }
+    {
+        let (w, s) = (ui.as_weak(), st.clone());
+        ui.on_preview_hover(move |u, v| {
+            let ui = w.unwrap();
+            let s = s.lock().unwrap();
+            let label = s
+                .zoom
+                .as_ref()
+                .and_then(|z| {
+                    let i = zoom::tile_at(&z.project, u as f64, v as f64)?;
+                    let photo = z.project.tiles[i].photo as usize;
+                    Some(z.known_path(photo).map(|p| file_name(p)).unwrap_or_else(|| format!("Photo {}", photo + 1)))
+                })
+                .unwrap_or_default();
+            if ui.get_preview_hover_label() != label.as_str() {
+                ui.set_preview_hover_label(label.into());
+            }
         });
     }
 
