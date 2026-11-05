@@ -38,11 +38,12 @@ slint::include_modules!();
 const DEFAULT_COLLECTION: &str = "My photos";
 /// Autosaved copy of the last mosaic, reopened on start.
 const LAST_PROJECT: &str = "last-project.json";
-/// Style presets: Sharp, Balanced, Varied → method and reuse limit.
-const STYLES: [(Method, u32, &str); 3] = [
-    (Method::Classic, 5, "Sharp: matches the colour of each tile as closely as possible. Fastest. Each photo is used at most 5 times."),
-    (Method::Structure, 3, "Balanced: also follows edges and shading inside each tile, so outlines look cleaner. Each photo is used at most 3 times."),
-    (Method::Variety, 2, "Varied: spreads the work over as many different photos as possible and avoids repeats nearby. Each photo is used at most 2 times."),
+/// Style presets: matching method and how often one photo may be used.
+/// The explanation of each style is in the tooltips (ui/app.slint).
+const STYLES: [(Method, u32); 3] = [
+    (Method::Classic, 5),
+    (Method::Structure, 3),
+    (Method::Variety, 2),
 ];
 
 #[derive(Default)]
@@ -285,9 +286,8 @@ fn show_outline(ui: &AppWindow, o: Option<&Outline>) {
 
 /// Applies a style preset: method defaults plus the preset's reuse limit.
 fn apply_style(ui: &AppWindow, i: i32) {
-    let (m, reuse, help) = STYLES[i.clamp(0, 2) as usize];
+    let (m, reuse) = STYLES[i.clamp(0, 2) as usize];
     let s = MatchSettings::for_method(m);
-    ui.set_style_help(help.into());
     ui.set_repeat_penalty(s.repeat_penalty);
     ui.set_repeat_radius(s.repeat_radius as i32);
     ui.set_usage_penalty(s.usage_penalty);
@@ -483,9 +483,8 @@ fn show_project(ui: &AppWindow, s: &mut State, p: Project, buf: SharedPixelBuffe
         ui.set_cols(p.grid.cols as i32);
         ui.set_rows(p.grid.rows as i32);
         ui.set_tile_mm(format!("{}", (p.grid.tile_mm().0 * 2.0).round() / 2.0).into());
-        let si = STYLES.iter().position(|(m, _, _)| *m == p.settings.method).unwrap_or(1);
+        let si = STYLES.iter().position(|(m, _)| *m == p.settings.method).unwrap_or(1);
         ui.set_style_index(si as i32);
-        ui.set_style_help(STYLES[si].2.into());
         ui.set_unlimited_reuse(p.settings.max_reuse.is_none());
         ui.set_max_reuse(p.settings.max_reuse.unwrap_or(3) as i32);
         ui.set_repeat_penalty(p.settings.repeat_penalty);
