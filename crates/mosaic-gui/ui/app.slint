@@ -39,6 +39,17 @@ export struct Figure {
     value: string,
 }
 
+// One page of the Help view. Text is in Simplified Technical English
+// (ASD-STE100 style): short sentences, one instruction per step.
+export struct HelpTopic {
+    title: string,
+    tint: color,
+    picture: image,
+    intro: string,
+    steps: [string],
+    notes: [string],
+}
+
 export struct SuggestionRow {
     label: string,
     path: string,
@@ -69,6 +80,8 @@ global Theme {
     out property <color> violet-soft: dark ? #2a2550 : #e9e6fd;
     out property <color> blue: dark ? #5aa9ff : #2774d9;
     out property <color> blue-soft: dark ? #15304f : #e0eefc;
+    // Neutral marker colour (Help "Start here"); stays visible in dark mode.
+    out property <color> neutral: dark ? #56607a : #1f2a3c;
 
     // Bar colours for the statistics charts, one per chart.
     out property <[color]> chart-colors: [blue, teal, coral, amber, violet, blue, teal, coral];
@@ -86,16 +99,83 @@ component StepHint inherits Hint {
     width: 304px;
 }
 
+// Dark box shown inside every tooltip. The text wraps at 300 px.
+component TipBox inherits Rectangle {
+    in property <string> text;
+    background: #1f2a3c;
+    border-radius: 6px;
+    drop-shadow-blur: 8px;
+    drop-shadow-color: #00000040;
+    VerticalLayout {
+        padding: 8px;
+        padding-left: 10px;
+        padding-right: 10px;
+        Text {
+            text: root.text;
+            width: min(300px, measure.preferred-width);
+            wrap: word-wrap;
+            color: #ffffff;
+            font-size: 12px;
+        }
+    }
+    measure := Text { text: root.text; font-size: 12px; visible: false; x: 0; y: 0; width: 0; height: 0; }
+}
+
+// Wraps any control so that pointing at it shows `tip` as a tooltip.
+component Tipped inherits Rectangle {
+    in property <string> tip;
+    HorizontalLayout {
+        spacing: 6px;
+        alignment: start;
+        @children
+    }
+    Tooltip { TipBox { text: root.tip; } }
+}
+
+// Small "?" circle that marks a control with a tooltip.
+component HelpDot inherits Rectangle {
+    width: 16px;
+    min-height: 16px;
+    Rectangle {
+        width: 16px;
+        height: 16px;
+        y: (parent.height - 16px) / 2;
+        border-radius: 8px;
+        border-width: 1px;
+        border-color: Theme.muted;
+        Text { text: "?"; color: Theme.muted; font-size: 10px; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; }
+    }
+}
+
 component Label inherits Text {
     color: Theme.fg;
     vertical-alignment: center;
 }
 
+// Label plus control(s) on one row. Pointing at the label shows `tip`.
 component Field inherits HorizontalLayout {
     in property <string> label;
+    in property <string> tip;
     spacing: 8px;
-    Label { text: root.label; min-width: 120px; font-size: 13px; }
+    Tipped {
+        tip: root.tip;
+        min-width: 120px;
+        Label { text: root.label; font-size: 13px; }
+        if root.tip != "": HelpDot { }
+    }
     @children
+}
+
+// Check box or switch with a "?" and a tooltip.
+component TipCheck inherits Tipped {
+    in property <string> text;
+    in-out property <bool> checked;
+    in property <bool> switch;
+    in property <bool> enabled: true;
+    callback toggled();
+    if !root.switch: CheckBox { text: root.text; checked <=> root.checked; enabled: root.enabled; toggled => { root.toggled(); } }
+    if root.switch: Switch { text: root.text; checked <=> root.checked; enabled: root.enabled; toggled => { root.toggled(); } }
+    HelpDot { }
 }
 
 // Small square button with up/down arrows: swaps width and height.
@@ -125,6 +205,7 @@ component SwapButton inherits Rectangle {
         mouse-cursor: pointer;
         clicked => { root.clicked(); }
     }
+    Tooltip { TipBox { text: root.tooltip-text; } }
 }
 
 // Filled button in a step colour.
@@ -190,14 +271,10 @@ component AdvancedPanel inherits Rectangle {
     }
 }
 
-// Wrapped hint inside an AdvancedPanel (step width minus the panel padding).
-component PanelHint inherits Hint {
-    width: 282px;
-}
-
 // Segmented control: one choice out of a few.
 component Segmented inherits Rectangle {
     in property <[string]> options;
+    in property <[string]> tips;
     in-out property <int> current: 0;
     in property <color> tint: Theme.amber;
     callback changed(int);
@@ -224,6 +301,7 @@ component Segmented inherits Rectangle {
                     root.changed(i);
                 }
             }
+            Tooltip { TipBox { text: root.tips[i]; } }
         }
     }
 }
@@ -254,9 +332,11 @@ component StepHeader inherits Rectangle {
     in property <string> summary;
     in property <bool> done;
     in property <color> tint;
+    in property <string> tip;
     callback clicked();
     height: 30px;
     TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
+    Tooltip { TipBox { text: root.tip; } }
     HorizontalLayout {
         spacing: 10px;
         Rectangle {
@@ -363,6 +443,7 @@ component Spinner inherits Rectangle {
 // Small button drawn over the preview.
 component OverlayButton inherits Rectangle {
     in property <string> text;
+    in property <string> tip;
     in property <bool> enabled: true;
     callback clicked();
     width: max(30px, t.preferred-width + 18px);
@@ -377,6 +458,7 @@ component OverlayButton inherits Rectangle {
         clicked => { root.clicked(); }
     }
     t := Text { text: root.text; color: root.enabled ? Theme.fg : Theme.muted; font-size: 13px; font-weight: 600; }
+    Tooltip { TipBox { text: root.tip; } }
 }
 
 // The mosaic preview. Scroll or double-click to zoom, drag to move.
@@ -518,9 +600,9 @@ component ZoomView inherits Rectangle {
             background: #000000b0;
             sharp := Text { text: "Loading sharp photos…"; color: #ffffff; font-size: 12px; }
         }
-        OverlayButton { text: "−"; enabled: root.zoom > 1.001; clicked => { root.zoom-at(1 / 1.6, root.width / 2, root.height / 2); } }
-        OverlayButton { text: round(root.zoom * 100) + "%"; enabled: root.zoom > 1.001; clicked => { root.fit(); } }
-        OverlayButton { text: "+"; enabled: root.zoom < root.max-zoom; clicked => { root.zoom-at(1.6, root.width / 2, root.height / 2); } }
+        OverlayButton { text: "−"; tip: "Zoom out."; enabled: root.zoom > 1.001; clicked => { root.zoom-at(1 / 1.6, root.width / 2, root.height / 2); } }
+        OverlayButton { text: round(root.zoom * 100) + "%"; tip: "Show the full mosaic again."; enabled: root.zoom > 1.001; clicked => { root.fit(); } }
+        OverlayButton { text: "+"; tip: "Zoom in. The app then loads the sharp photos."; enabled: root.zoom < root.max-zoom; clicked => { root.zoom-at(1.6, root.width / 2, root.height / 2); } }
     }
 }
 
@@ -535,7 +617,7 @@ export component AppWindow inherits Window {
 
     // ----- which step is open, and what the big area on the right shows
     in-out property <int> open-step: 1;
-    in-out property <int> main-view: 0; // 0 preview, 1 motif suggestions, 2 info text, 3 statistics, 4 folder check
+    in-out property <int> main-view: 0; // 0 preview, 1 motif suggestions, 2 info text, 3 statistics, 4 folder check, 5 help
     in-out property <string> info-title;
     in-out property <string> info-text;
     in-out property <string> notice; // error or important message shown above the preview
@@ -572,7 +654,6 @@ export component AppWindow inherits Window {
     in-out property <int> cols: 60;
     in-out property <int> rows: 45;
     in-out property <int> style-index: 1;
-    in-out property <string> style-help;
     in-out property <string> grid-info;
     in-out property <string> size-summary;
     in-out property <bool> size-advanced: false;
@@ -635,6 +716,160 @@ export component AppWindow inherits Window {
     in-out property <[Chart]> stat-charts-left;
     in-out property <[Chart]> stat-charts-right;
     in-out property <string> stats-note;
+
+    // ----- Help (header "Help" button). Screenshots are in ui/help/.
+    in-out property <int> help-topic: 0;
+    out property <[HelpTopic]> help-topics: [
+        {
+            title: "Start here",
+            tint: Theme.neutral,
+            picture: @image-url("help/start.jpg"),
+            intro: "MosaiCxM makes one big picture from many small photos. Each small photo is a tile. Do the steps on the left from top to bottom. The preview on the right shows your mosaic.",
+            steps: [
+                "In step 1, add the folders with your photos.",
+                "In step 2, choose the picture that the mosaic copies.",
+                "In step 3, set the size of the mosaic and of the tiles.",
+                "Click Make preview. Wait until the mosaic shows on the right.",
+                "In step 4, export the mosaic as an image file or as pages to print.",
+            ],
+            notes: [
+                "Point at a control and wait a moment. A tooltip tells you what the control does. A small ? next to a name shows that it has a tooltip.",
+                "The app saves your work automatically. When you start the app again, it opens your last mosaic.",
+                "To look closer at the preview, scroll or double-click it. Drag it to move. Click the percentage to see the full mosaic again.",
+                "To keep a mosaic as a file, click Save as…. To use it again, click Open….",
+                "When you change a setting, the preview shows \"Settings changed since this preview\". Click Update preview to see the change.",
+            ],
+        },
+        {
+            title: "1  Photos",
+            tint: Theme.teal,
+            picture: @image-url("help/photos.png"),
+            intro: "Your photos become the tiles of the mosaic. More photos give a better mosaic. The app only reads your photos. It does not change, move or delete them.",
+            steps: [
+                "Click + Add folder.",
+                "Select a folder with your photos. The app also uses the photos in its subfolders.",
+                "Look at the sample photos on the right. If they are the correct photos, click Use this folder.",
+                "Wait until the scan is done. The status bar then shows a green tick and the number of photos.",
+            ],
+            notes: [
+                "The app can read JPEG, PNG, WebP and TIFF files.",
+                "Each time the app starts, it checks the folders again. It adds new photos and removes deleted photos.",
+                "If a folder has a yellow box, the app cannot find the folder. Connect the drive again, or click Find it… and select the new location.",
+                "If the app skips some files, click why? to see the reason for each file.",
+                "Click Remove to stop using a folder. This does not delete your photos.",
+                "If you have more than one collection, click Choose collections to select the collections to use.",
+            ],
+        },
+        {
+            title: "2  Picture",
+            tint: Theme.coral,
+            picture: @image-url("help/picture.jpg"),
+            intro: "The picture is the image that your mosaic copies. From near, people see your photos. From far away, they see the picture.",
+            steps: [
+                "Click Choose picture….",
+                "Select an image file.",
+                "Look at the picture in step 2. The app turns the mosaic to portrait or landscape to match the picture.",
+            ],
+            notes: [
+                "Faces, animals and bold shapes give the best result. Very small details do not show in a mosaic.",
+                "Pictures with strong contrast and large areas of colour are easy to see from far away.",
+                "If you do not know which picture to use, click Help me choose. Select a folder of pictures to test, then click Find good pictures.",
+                "The app gives each picture a score. The score shows how well your photos can copy the picture. It does not show if a picture is beautiful.",
+                "Click Use next to a picture to select it.",
+            ],
+        },
+        {
+            title: "3  Size & style",
+            tint: Theme.amber,
+            picture: @image-url("help/size.png"),
+            intro: "This step sets the size of the mosaic, the size of each tile, and how the app selects the photos.",
+            steps: [
+                "Type the width and the height of the mosaic in millimetres. To change between portrait and landscape, click the arrow button.",
+                "Type the tile size in millimetres.",
+                "If you do not want a rectangle, select a shape.",
+                "Select a style: Sharp, Balanced or Varied.",
+                "Click Make preview.",
+            ],
+            notes: [
+                "The line below the shape shows the number of tiles and the best distance to look at the mosaic from.",
+                "Small tiles show more detail, but you need more photos. If the app shows \"Not enough photos\", use bigger tiles or add more photos.",
+                "If the picture and the mosaic have different shapes, the app cuts off a part of the picture. The same line tells you how much.",
+                "Sharp matches the colours best and is the fastest. Balanced also follows edges. Varied uses the most different photos.",
+                "Advanced has more settings, for example Colour correction. Point at each setting to read what it does.",
+            ],
+        },
+        {
+            title: "4  Export",
+            tint: Theme.violet,
+            picture: @image-url("help/export.jpg"),
+            intro: "Export saves the full-size mosaic. Make a preview first. The export uses the same photos as the preview.",
+            steps: [
+                "Select Image file or Print pages (PDF).",
+                "For an image file, select the format and the print quality.",
+                "For print pages, select the paper size. If you want wide pages, select Landscape.",
+                "Click Export image… or Export PDF…, and select where to save the file.",
+                "Wait until the status bar shows that the export is done.",
+            ],
+            notes: [
+                "Use an image file for a print shop. A BigTIFF file can be any size.",
+                "300 DPI gives a sharp print. A big mosaic at 300 DPI makes a very big file.",
+                "The box above the export button shows the size of the file or the number of pages.",
+                "The app can also save a list of the photos that it used (CSV). A spreadsheet program can open this list.",
+                "Each export also saves the statistics as a .stats.json file next to the mosaic.",
+            ],
+        },
+        {
+            title: "5  Statistics",
+            tint: Theme.blue,
+            picture: @image-url("help/statistics.png"),
+            intro: "Statistics show which photos your mosaic uses and how often. They also show the camera settings of the photos, if the photo files have this data.",
+            steps: [
+                "Make a preview.",
+                "Open step 5 and click Show statistics.",
+                "To keep the numbers in a file, click Save as JSON….",
+            ],
+            notes: [
+                "The camera settings come from the EXIF data in the photo files. Some photos do not have EXIF data.",
+                "Each export also saves the statistics next to the mosaic.",
+            ],
+        },
+        {
+            title: "Print and glue the pages",
+            tint: Theme.violet,
+            picture: @image-url("help/print.jpg"),
+            intro: "The PDF has a map on the first page. The other pages are the parts of the mosaic. Each page has a name, for example A1.",
+            steps: [
+                "Print all pages at 100% (Actual size). Turn off Fit to page and borderless printing.",
+                "Measure the square on the first page. It must be 50 × 50 mm. If it is not, correct the printer settings.",
+                "Find the name on each page. The letter is the row. The number is the column. A1 is the top-left page.",
+                "Cut the left edge of each page, but not the pages in column 1. Cut along the crop marks.",
+                "Cut the top edge of each page, but not the pages in row A.",
+                "Put each cut page on its left and upper neighbour. Align the cut edge with the marks, then glue it.",
+                "At the end, cut the outer edges along the crop marks.",
+            ],
+            notes: [
+                "Each page shows the names of the pages next to it.",
+                "Grey pages on the map are empty. The app does not print them.",
+                "Glue overlap in Advanced sets how much the pages overlap.",
+            ],
+        },
+        {
+            title: "Problems",
+            tint: Theme.coral,
+            picture: @image-url("help/problems.jpg"),
+            intro: "Find your problem below. Each line gives the problem and then what to do.",
+            steps: [],
+            notes: [
+                "The export button is grey: make a preview first.",
+                "The preview shows \"Settings changed since this preview\": click Update preview.",
+                "\"Not enough photos\": use bigger tiles or add more photos. Or, in Advanced, tick Use each photo as often as needed.",
+                "The mosaic does not look like the picture: use smaller tiles, or increase Colour correction in Advanced. Look at the preview from further away.",
+                "The app works for a long time: big mosaics need more time. The wheel in the status bar turns while the app works. To stop, click Cancel.",
+                "The printed pages do not fit together: print at 100% (Actual size), then measure the 50 mm square.",
+                "A folder shows \"Folder not found\": connect the drive again, or click Find it….",
+            ],
+        },
+    ];
 
     // ----- job status
     in-out property <bool> busy: false;
@@ -701,17 +936,21 @@ export component AppWindow inherits Window {
                 }
                 Text { text: "MosaiCxM"; horizontal-stretch: 0; color: #ffffff; font-size: 18px; font-weight: 700; vertical-alignment: center; }
                 Text { text: root.project-name; color: #b8c0d0; font-size: 13px; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; }
-                for item[i] in ["Open…", "Save as…"]: Rectangle {
+                for item[i] in ["Open…", "Save as…", "Help"]: Rectangle {
                     width: t.preferred-width + 24px;
                     height: 32px;
                     y: 10px;
                     border-radius: 6px;
                     background: ta.has-hover ? #ffffff22 : transparent;
-                    t := Text { text: item; color: (i == 1 && !root.has-preview) ? #6d7586 : #e9edf5; font-size: 13px; }
+                    t := Text { text: item; color: (i == 1 && !root.has-preview) ? #6d7586 : #e9edf5; font-size: 13px; font-weight: i == 2 ? 700 : 400; }
                     ta := TouchArea {
-                        enabled: !root.busy && (i == 0 || root.has-preview);
+                        enabled: i == 2 || (!root.busy && (i == 0 || root.has-preview));
                         mouse-cursor: pointer;
-                        clicked => { if (i == 0) { root.open-project(); } else { root.save-project(); } }
+                        clicked => {
+                            if (i == 0) { root.open-project(); }
+                            else if (i == 1) { root.save-project(); }
+                            else { root.main-view = root.main-view == 5 ? 0 : 5; }
+                        }
                     }
                 }
             }
@@ -743,11 +982,11 @@ export component AppWindow inherits Window {
                                 summary: root.photos-summary;
                                 done: root.photo-count > 0;
                                 tint: Theme.teal;
+                                tip: "Add the folders with your photos. The photos become the small tiles of the mosaic.";
                                 clicked => { root.open-step = 1; }
                             }
                             if root.open-step == 1: VerticalLayout {
                                 spacing: 8px;
-                                StepHint { text: "Add the folders with your photos. They are scanned right away and checked again each time the app starts. Photos are only read, never changed."; }
                                 for f[i] in root.folders: Rectangle {
                                     border-radius: 6px;
                                     background: f.missing ? Theme.amber-soft : transparent;
@@ -778,11 +1017,14 @@ export component AppWindow inherits Window {
                                 HorizontalLayout {
                                     spacing: 10px;
                                     alignment: start;
-                                    ColorButton {
-                                        text: "+ Add folder";
-                                        tint: Theme.teal;
-                                        enabled: !root.busy;
-                                        clicked => { root.add-folder(); }
+                                    Tipped {
+                                        tip: "Select a folder with your photos. The app also uses the photos in its subfolders. The app only reads your photos. It does not change them.";
+                                        ColorButton {
+                                            text: "+ Add folder";
+                                            tint: Theme.teal;
+                                            enabled: !root.busy;
+                                            clicked => { root.add-folder(); }
+                                        }
                                     }
                                     if root.skipped-count > 0: LinkButton {
                                         text: root.skipped-count + " files skipped · why?";
@@ -818,11 +1060,11 @@ export component AppWindow inherits Window {
                                 summary: root.motif-name == "" ? "Not chosen" : root.motif-name;
                                 done: root.motif-path != "";
                                 tint: Theme.coral;
+                                tip: "Choose the picture that your mosaic copies.";
                                 clicked => { root.open-step = 2; }
                             }
                             if root.open-step == 2: VerticalLayout {
                                 spacing: 8px;
-                                StepHint { text: "The picture your mosaic should look like. Faces, animals and bold shapes work best."; }
                                 if root.motif-path != "": Rectangle {
                                     height: 150px;
                                     border-radius: 8px;
@@ -832,17 +1074,23 @@ export component AppWindow inherits Window {
                                 HorizontalLayout {
                                     spacing: 10px;
                                     alignment: start;
-                                    ColorButton {
-                                        text: root.motif-path == "" ? "Choose picture…" : "Change picture…";
-                                        tint: Theme.coral;
-                                        clicked => { root.browse-motif(); }
+                                    Tipped {
+                                        tip: "Select the picture that your mosaic copies. Faces, animals and bold shapes give the best result.";
+                                        ColorButton {
+                                            text: root.motif-path == "" ? "Choose picture…" : "Change picture…";
+                                            tint: Theme.coral;
+                                            clicked => { root.browse-motif(); }
+                                        }
                                     }
-                                    LinkButton {
-                                        text: "Help me choose";
-                                        tint: Theme.coral;
-                                        font-weight: 600;
-                                        vertical-alignment: center;
-                                        clicked => { root.main-view = 1; }
+                                    Tipped {
+                                        tip: "Test some pictures and see which ones your photos can copy best.";
+                                        LinkButton {
+                                            text: "Help me choose";
+                                            tint: Theme.coral;
+                                            font-weight: 600;
+                                            vertical-alignment: center;
+                                            clicked => { root.main-view = 1; }
+                                        }
                                     }
                                 }
                             }
@@ -859,6 +1107,7 @@ export component AppWindow inherits Window {
                                 summary: root.size-summary;
                                 done: root.has-preview && !root.preview-stale;
                                 tint: Theme.amber;
+                                tip: "Set the size of the mosaic, the size of the tiles and the style.";
                                 clicked => { root.open-step = 3; }
                             }
                             if root.open-step == 3: VerticalLayout {
@@ -868,20 +1117,21 @@ export component AppWindow inherits Window {
                                     VerticalLayout {
                                         spacing: 8px;
                                         horizontal-stretch: 1;
-                                        Field { label: "Width (mm)"; LineEdit { min-width: 80px; text <=> root.width-mm; edited => { root.changed(); } } }
-                                        Field { label: "Height (mm)"; LineEdit { min-width: 80px; text <=> root.height-mm; edited => { root.changed(); } } }
+                                        Field { label: "Width (mm)"; tip: "The width of the finished mosaic in millimetres. 1000 mm is 1 metre."; LineEdit { min-width: 80px; text <=> root.width-mm; edited => { root.changed(); } } }
+                                        Field { label: "Height (mm)"; tip: "The height of the finished mosaic in millimetres."; LineEdit { min-width: 80px; text <=> root.height-mm; edited => { root.changed(); } } }
                                     }
                                     SwapButton {
-                                        tooltip-text: "Swap width and height (portrait / landscape)";
+                                        tooltip-text: "Swap the width and the height. This changes the mosaic from portrait to landscape, or from landscape to portrait.";
                                         clicked => {
                                             root.swap-size();
                                             root.changed();
                                         }
                                     }
                                 }
-                                if !root.use-grid: Field { label: "Tile size (mm)"; LineEdit { text <=> root.tile-mm; edited => { root.changed(); } } }
+                                if !root.use-grid: Field { label: "Tile size (mm)"; tip: "The size of each small photo. Small tiles show more detail, but you need more photos. Big tiles look good from far away."; LineEdit { text <=> root.tile-mm; edited => { root.changed(); } } }
                                 Field {
                                     label: "Shape";
+                                    tip: "The outline of the mosaic. Tiles go only inside the shape.";
                                     ComboBox {
                                         model: ["Rectangle", "Ellipse", "Heart", "Hexagon", "Diamond", "Star", "From file (SVG, PNG, JPG…)"];
                                         current-index <=> root.shape-index;
@@ -893,19 +1143,29 @@ export component AppWindow inherits Window {
                                 }
                                 if root.shape-index == 6: Field {
                                     label: "Shape file";
+                                    tip: "SVG: the drawn parts make the shape. PNG with transparency: the solid parts make the shape. Other pictures: the dark parts make the shape.";
                                     Text { text: root.shape-file-name == "" ? "None chosen" : root.shape-file-name; color: Theme.fg; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; }
                                     Button { text: "Choose…"; clicked => { root.browse-shape(); } }
                                 }
-                                if root.shape-index == 6: CheckBox { text: "Swap inside and outside"; checked <=> root.shape-invert; toggled => { root.changed(); } }
+                                if root.shape-index == 6: TipCheck { text: "Swap inside and outside"; tip: "Put the tiles outside the shape, not inside it."; checked <=> root.shape-invert; toggled => { root.changed(); } }
                                 if root.shape-index > 0: Field {
                                     label: "Outside the shape";
+                                    tip: "The colour of the area outside the shape.";
                                     ComboBox { model: ["White", "Black", "Light grey"]; current-index <=> root.shape-background-index; selected => { root.changed(); } }
                                 }
-                                if root.shape-index == 6: StepHint { text: "SVG: the drawn parts are the shape. PNG with transparency: the solid parts. Other pictures: the dark parts."; }
                                 StepHint { text: root.grid-info; }
-                                Label { text: "Style"; font-size: 13px; }
+                                Tipped {
+                                    tip: "How the app selects a photo for each tile. Point at each style to read more.";
+                                    Label { text: "Style"; font-size: 13px; }
+                                    HelpDot { }
+                                }
                                 Segmented {
                                     options: ["Sharp", "Balanced", "Varied"];
+                                    tips: [
+                                        "Sharp: the app matches the colour of each tile as closely as possible. This is the fastest style. Each photo is used 5 times or less.",
+                                        "Balanced: the app also follows edges and shading in each tile, so outlines look cleaner. Each photo is used 3 times or less.",
+                                        "Varied: the app uses as many different photos as possible and prevents repeats near each other. Each photo is used 2 times or less.",
+                                    ];
                                     current <=> root.style-index;
                                     tint: Theme.amber;
                                     changed(i) => {
@@ -913,7 +1173,6 @@ export component AppWindow inherits Window {
                                         root.changed();
                                     }
                                 }
-                                StepHint { text: root.style-help; }
                                 AdvancedPanel {
                                     text: "grid, reuse, colour correction…";
                                     expanded: root.size-advanced;
@@ -921,40 +1180,45 @@ export component AppWindow inherits Window {
                                     toggled => { root.size-advanced = !root.size-advanced; }
                                     if root.size-advanced: VerticalLayout {
                                         spacing: 6px;
-                                        Switch { text: "Set columns × rows instead of tile size"; checked <=> root.use-grid; toggled => { root.changed(); } }
+                                        TipCheck { switch: true; text: "Set columns × rows instead of tile size"; tip: "Type the number of tiles across and down. The app then calculates the tile size."; checked <=> root.use-grid; toggled => { root.changed(); } }
                                         if root.use-grid: Field {
                                             label: "Columns × rows";
+                                            tip: "The number of tiles across (columns) and down (rows).";
                                             SpinBox { minimum: 1; maximum: 2000; value <=> root.cols; edited => { root.changed(); } }
                                             SpinBox { minimum: 1; maximum: 2000; value <=> root.rows; edited => { root.changed(); } }
                                         }
-                                        CheckBox { text: "Use each photo as often as needed"; checked <=> root.unlimited-reuse; toggled => { root.changed(); } }
-                                        Field { label: "Max uses per photo"; SpinBox { enabled: !root.unlimited-reuse; minimum: 1; maximum: 10000; value <=> root.max-reuse; edited => { root.changed(); } } }
+                                        TipCheck { text: "Use each photo as often as needed"; tip: "Remove the limit on how many times one photo can be used. Use this if you have few photos."; checked <=> root.unlimited-reuse; toggled => { root.changed(); } }
+                                        Field { label: "Max uses per photo"; tip: "The maximum number of times that the app can use one photo. The style sets this value. You can change it here."; SpinBox { enabled: !root.unlimited-reuse; minimum: 1; maximum: 10000; value <=> root.max-reuse; edited => { root.changed(); } } }
                                         Field {
                                             label: "Avoid nearby repeats";
+                                            tip: "Higher values stop the same photo from showing close to itself. 0 turns this off.";
                                             Slider { minimum: 0; maximum: 30; value <=> root.repeat-penalty; changed => { root.changed(); } }
                                             Text { text: round(root.repeat-penalty); min-width: 28px; color: Theme.fg; vertical-alignment: center; }
                                         }
-                                        Field { label: "…within (tiles)"; SpinBox { minimum: 1; maximum: 20; value <=> root.repeat-radius; edited => { root.changed(); } } }
+                                        Field { label: "…within (tiles)"; tip: "The distance in tiles that counts as near for the setting above."; SpinBox { minimum: 1; maximum: 20; value <=> root.repeat-radius; edited => { root.changed(); } } }
                                         Field {
                                             label: "Spread photo use";
+                                            tip: "Higher values make the app use more different photos. This works only with the Varied style.";
                                             Slider { enabled: root.style-index == 2; minimum: 0; maximum: 10; value <=> root.usage-penalty; changed => { root.changed(); } }
                                             Text { text: round(root.usage-penalty * 10) / 10; min-width: 28px; color: Theme.fg; vertical-alignment: center; }
                                         }
-                                        CheckBox { text: "Try off-centre crops"; checked <=> root.crop-offsets; toggled => { root.changed(); } }
+                                        TipCheck { text: "Try off-centre crops"; tip: "The app also tries to cut each photo away from its centre, if this gives a better match. This is slower."; checked <=> root.crop-offsets; toggled => { root.changed(); } }
                                         if root.shape-index > 0: Field {
                                             label: "Edge tiles";
+                                            tip: "Tiles on the edge of the shape. A tile is used only if this much of it is inside the shape.";
                                             Slider { minimum: 0.05; maximum: 1; value <=> root.shape-threshold; changed => { root.changed(); } }
                                             Text { text: round(root.shape-threshold * 100) + "% in"; min-width: 48px; color: Theme.fg; vertical-alignment: center; }
                                         }
-                                        Field { label: "Shuffle number"; SpinBox { minimum: 0; maximum: 1000000; value <=> root.seed; edited => { root.changed(); } } }
-                                        PanelHint { text: "These two change how your photos look. Higher values make the picture easier to recognise."; }
+                                        Field { label: "Shuffle number"; tip: "Change this number to get a different mix of photos with the same settings. The same number always gives the same mosaic."; SpinBox { minimum: 0; maximum: 1000000; value <=> root.seed; edited => { root.changed(); } } }
                                         Field {
                                             label: "Colour correction";
+                                            tip: "Moves the colour of each photo near the colour of the picture. Higher values make the picture easier to see. This changes how your photos look.";
                                             Slider { minimum: 0; maximum: 0.5; value <=> root.color-correction; changed => { root.changed(); } }
                                             Text { text: round(root.color-correction * 100) + "%"; min-width: 36px; color: Theme.fg; vertical-alignment: center; }
                                         }
                                         Field {
                                             label: "Blend in picture";
+                                            tip: "Mixes the picture over the photos. Higher values make the picture easier to see, but the photos are less clear.";
                                             Slider { minimum: 0; maximum: 0.5; value <=> root.motif-blend; changed => { root.changed(); } }
                                             Text { text: round(root.motif-blend * 100) + "%"; min-width: 36px; color: Theme.fg; vertical-alignment: center; }
                                         }
@@ -974,6 +1238,7 @@ export component AppWindow inherits Window {
                                 summary: root.has-preview ? (root.export-kind == 0 ? "Image file" : "Print pages") : "After preview";
                                 done: false;
                                 tint: Theme.violet;
+                                tip: "Save the mosaic as one image file, or as pages to print and glue together.";
                                 clicked => {
                                     root.open-step = 4;
                                     root.export-settings-changed();
@@ -981,27 +1246,31 @@ export component AppWindow inherits Window {
                             }
                             if root.open-step == 4: VerticalLayout {
                                 spacing: 8px;
-                                if !root.has-preview: StepHint { text: "Make a preview first. Export uses exactly the photos shown in the preview."; }
                                 Segmented {
                                     options: ["Image file", "Print pages (PDF)"];
+                                    tips: [
+                                        "Save the mosaic as one big image file. Use this for a print shop or to show it on a screen.",
+                                        "Save the mosaic as pages in a PDF file. Print the pages at home and glue them together.",
+                                    ];
                                     current <=> root.export-kind;
                                     tint: Theme.violet;
                                     changed => { root.export-settings-changed(); }
                                 }
                                 if root.export-kind == 0: VerticalLayout {
                                     spacing: 6px;
-                                    Field { label: "Format"; ComboBox { model: ["BigTIFF (any size)", "PNG", "JPEG (up to 65,535 px)"]; current-index <=> root.raster-format-index; selected => { root.export-settings-changed(); } } }
-                                    Field { label: "Print quality (DPI)"; LineEdit { text <=> root.export-dpi; edited => { root.export-settings-changed(); } } }
+                                    Field { label: "Format"; tip: "BigTIFF can be any size. Use PNG or JPEG only if another program cannot open BigTIFF. JPEG has a maximum size."; ComboBox { model: ["BigTIFF (any size)", "PNG", "JPEG (up to 65,535 px)"]; current-index <=> root.raster-format-index; selected => { root.export-settings-changed(); } } }
+                                    Field { label: "Print quality (DPI)"; tip: "Dots per inch. 300 gives a sharp print. Lower values make a smaller file."; LineEdit { text <=> root.export-dpi; edited => { root.export-settings-changed(); } } }
                                 }
                                 if root.export-kind == 1: VerticalLayout {
                                     spacing: 6px;
-                                    Field { label: "Paper"; ComboBox { model: ["A4", "A3", "A2", "A1", "A0", "Letter", "Legal", "Tabloid", "Custom"]; current-index <=> root.paper-index; selected => { root.export-settings-changed(); } } }
+                                    Field { label: "Paper"; tip: "The paper size in your printer."; ComboBox { model: ["A4", "A3", "A2", "A1", "A0", "Letter", "Legal", "Tabloid", "Custom"]; current-index <=> root.paper-index; selected => { root.export-settings-changed(); } } }
                                     if root.paper-index == 8: Field {
                                         label: "Paper W × H (mm)";
+                                        tip: "The width and height of your paper in millimetres.";
                                         LineEdit { text <=> root.custom-w; edited => { root.export-settings-changed(); } }
                                         LineEdit { text <=> root.custom-h; edited => { root.export-settings-changed(); } }
                                     }
-                                    CheckBox { text: "Landscape"; checked <=> root.landscape; toggled => { root.export-settings-changed(); } }
+                                    TipCheck { text: "Landscape"; tip: "Turn the pages so that they are wider than they are tall."; checked <=> root.landscape; toggled => { root.export-settings-changed(); } }
                                     AdvancedPanel {
                                         text: "margins, overlap, DPI, marks";
                                         expanded: root.export-advanced;
@@ -1009,10 +1278,10 @@ export component AppWindow inherits Window {
                                         toggled => { root.export-advanced = !root.export-advanced; }
                                         if root.export-advanced: VerticalLayout {
                                             spacing: 6px;
-                                            Field { label: "Printer margin (mm)"; LineEdit { text <=> root.margin-mm; edited => { root.export-settings-changed(); } } }
-                                            Field { label: "Glue overlap (mm)"; LineEdit { text <=> root.overlap-mm; edited => { root.export-settings-changed(); } } }
-                                            Field { label: "Print quality (DPI)"; LineEdit { text <=> root.pdf-dpi; edited => { root.export-settings-changed(); } } }
-                                            CheckBox { text: "Crop marks, labels and ruler"; checked <=> root.marks; toggled => { root.export-settings-changed(); } }
+                                            Field { label: "Printer margin (mm)"; tip: "The edge of the paper that your printer cannot print on."; LineEdit { text <=> root.margin-mm; edited => { root.export-settings-changed(); } } }
+                                            Field { label: "Glue overlap (mm)"; tip: "Each page shows this much of the next page. You put the pages on top of each other here and glue them."; LineEdit { text <=> root.overlap-mm; edited => { root.export-settings-changed(); } } }
+                                            Field { label: "Print quality (DPI)"; tip: "Dots per inch. 300 gives a sharp print. Lower values make a smaller file."; LineEdit { text <=> root.pdf-dpi; edited => { root.export-settings-changed(); } } }
+                                            TipCheck { text: "Crop marks, labels and ruler"; tip: "Print lines that show where to cut, a name on each page (A1, A2…) and a ruler to check the size."; checked <=> root.marks; toggled => { root.export-settings-changed(); } }
                                         }
                                     }
                                 }
@@ -1024,17 +1293,21 @@ export component AppWindow inherits Window {
                                         Text { text: root.export-summary; font-size: 12px; color: Theme.fg; wrap: word-wrap; }
                                     }
                                 }
-                                CheckBox { text: "Also save a list of the photos used (CSV)"; checked <=> root.save-manifest; }
+                                TipCheck { text: "Also save a list of the photos used (CSV)"; tip: "Save a list of all photos in the mosaic and where each one is. A spreadsheet program can open this file."; checked <=> root.save-manifest; }
                                 HorizontalLayout {
                                     alignment: start;
-                                    ColorButton {
-                                        text: root.export-kind == 0 ? "Export image…" : "Export PDF…";
-                                        tint: Theme.violet;
-                                        enabled: !root.busy && root.has-preview;
-                                        clicked => { root.export(); }
+                                    Tipped {
+                                        tip: !root.has-preview ? "Make a preview first. The export uses the same photos as the preview."
+                                            : root.export-kind == 0 ? "Select where to save the image file."
+                                            : "Select where to save the PDF. Then print it at 100% (Actual size) with Fit to page turned off. Measure the 50 mm square to check the size.";
+                                        ColorButton {
+                                            text: root.export-kind == 0 ? "Export image…" : "Export PDF…";
+                                            tint: Theme.violet;
+                                            enabled: !root.busy && root.has-preview;
+                                            clicked => { root.export(); }
+                                        }
                                     }
                                 }
-                                if root.export-kind == 1: StepHint { text: "Print at 100% (Actual size) with Fit to page turned off, then check the 50 mm square."; }
                                 if root.export-report != "": StepHint { text: root.export-report; }
                             }
                         }
@@ -1050,6 +1323,7 @@ export component AppWindow inherits Window {
                                 summary: root.has-preview ? root.stats-summary : "After preview";
                                 done: false;
                                 tint: Theme.blue;
+                                tip: "See which photos the mosaic uses, how often, and with which camera settings.";
                                 clicked => {
                                     root.open-step = 5;
                                     root.show-stats();
@@ -1057,23 +1331,27 @@ export component AppWindow inherits Window {
                             }
                             if root.open-step == 5: VerticalLayout {
                                 spacing: 8px;
-                                if !root.has-preview: StepHint { text: "Make a preview first. The statistics describe the photos in your mosaic."; }
-                                if root.has-preview: StepHint { text: "Which photos your mosaic uses, how often, and the camera settings they were taken with. Every export also saves them as a .stats.json file."; }
                                 HorizontalLayout {
                                     spacing: 10px;
                                     alignment: start;
-                                    ColorButton {
-                                        text: "Show statistics";
-                                        tint: Theme.blue;
-                                        enabled: !root.busy && root.has-preview;
-                                        clicked => { root.show-stats(); }
+                                    Tipped {
+                                        tip: !root.has-preview ? "Make a preview first. The statistics are about the photos in your mosaic." : "Show which photos the mosaic uses, how often, and the camera settings of the photos.";
+                                        ColorButton {
+                                            text: "Show statistics";
+                                            tint: Theme.blue;
+                                            enabled: !root.busy && root.has-preview;
+                                            clicked => { root.show-stats(); }
+                                        }
                                     }
-                                    LinkButton {
-                                        text: "Save as JSON…";
-                                        tint: Theme.blue;
-                                        font-weight: 600;
-                                        vertical-alignment: center;
-                                        clicked => { root.save-stats-json(); }
+                                    Tipped {
+                                        tip: "Save the statistics as a JSON file. Each export also saves this file next to the mosaic.";
+                                        LinkButton {
+                                            text: "Save as JSON…";
+                                            tint: Theme.blue;
+                                            font-weight: 600;
+                                            vertical-alignment: center;
+                                            clicked => { root.save-stats-json(); }
+                                        }
                                     }
                                 }
                             }
@@ -1177,10 +1455,14 @@ export component AppWindow inherits Window {
                 if root.main-view == 1: VerticalLayout {
                     spacing: 8px;
                     HorizontalLayout {
-                        Text { text: "Help me choose a picture"; font-size: 18px; font-weight: 700; color: Theme.fg; horizontal-stretch: 1; }
+                        Tipped {
+                            horizontal-stretch: 1;
+                            tip: "The app gives each picture a score. The score shows how well your photos can copy the picture at the current size and style. It does not show if a picture is beautiful.";
+                            Text { text: "Help me choose a picture"; font-size: 18px; font-weight: 700; color: Theme.fg; }
+                            HelpDot { }
+                        }
                         LinkButton { text: "Back to preview"; tint: Theme.coral; font-weight: 600; vertical-alignment: center; clicked => { root.main-view = 0; } }
                     }
-                    Hint { text: "Ranks pictures by how well your photos can rebuild them at the current size and style: colour coverage, enough different photos, and detail lost at this tile size. It does not judge artistic quality."; }
                     HorizontalLayout {
                         spacing: 8px;
                         LineEdit { placeholder-text: "Folder of pictures to try (optional)"; text <=> root.suggest-folder; }
@@ -1191,7 +1473,7 @@ export component AppWindow inherits Window {
                         Label { text: "Also try this many of my own photos:"; font-size: 13px; }
                         SpinBox { width: 140px; minimum: 0; maximum: 500; value <=> root.suggest-from-library; }
                         Rectangle { horizontal-stretch: 1; }
-                        ColorButton { text: "Find good pictures"; tint: Theme.coral; enabled: !root.busy; clicked => { root.suggest(); } }
+                        Tipped { tip: "Test the pictures in the folder above and some of your own photos. The best pictures show first."; ColorButton { text: "Find good pictures"; tint: Theme.coral; enabled: !root.busy; clicked => { root.suggest(); } } }
                     }
                     Hint { text: root.suggest-report; }
                     sugg-scroll := ScrollView {
@@ -1316,6 +1598,98 @@ export component AppWindow inherits Window {
                                 clip: true;
                                 background: Theme.line;
                                 Image { source: t; width: parent.width; height: parent.height; image-fit: cover; }
+                            }
+                        }
+                    }
+                }
+
+                if root.main-view == 5: VerticalLayout {
+                    spacing: 10px;
+                    HorizontalLayout {
+                        Text { text: "Help"; font-size: 18px; font-weight: 700; color: Theme.fg; horizontal-stretch: 1; }
+                        LinkButton { text: "Back to preview"; font-weight: 600; vertical-alignment: center; clicked => { root.main-view = 0; } }
+                    }
+                    HorizontalLayout {
+                        spacing: 14px;
+                        vertical-stretch: 1;
+                        // Topic list
+                        VerticalLayout {
+                            width: 200px;
+                            spacing: 4px;
+                            alignment: start;
+                            for t[i] in root.help-topics: Rectangle {
+                                height: 34px;
+                                border-radius: 8px;
+                                background: i == root.help-topic ? Theme.surface : (hta.has-hover ? Theme.line : transparent);
+                                border-width: i == root.help-topic ? 1px : 0px;
+                                border-color: Theme.line;
+                                hta := TouchArea { mouse-cursor: pointer; clicked => { root.help-topic = i; } }
+                                HorizontalLayout {
+                                    padding-left: 10px;
+                                    spacing: 8px;
+                                    Rectangle { width: 4px; height: 18px; y: 8px; border-radius: 2px; background: t.tint; }
+                                    Text { text: t.title; font-size: 13px; font-weight: i == root.help-topic ? 700 : 400; color: Theme.fg; vertical-alignment: center; }
+                                }
+                            }
+                        }
+                        // Topic page
+                        Rectangle {
+                            horizontal-stretch: 1;
+                            background: Theme.surface;
+                            border-radius: 10px;
+                            border-width: 1px;
+                            border-color: Theme.line;
+                            clip: true;
+                            help-scroll := ScrollView {
+                                property <HelpTopic> t: root.help-topics[root.help-topic];
+                                // Start each topic at the top.
+                                property <int> topic: root.help-topic;
+                                changed topic => { self.content-y = 0; }
+                                property <length> text-w: min(help-scroll.visible-width - 48px, 720px);
+                                VerticalLayout {
+                                    width: help-scroll.visible-width;
+                                    padding: 24px;
+                                    spacing: 12px;
+                                    alignment: start;
+                                    HorizontalLayout {
+                                        spacing: 10px;
+                                        Rectangle { width: 6px; border-radius: 3px; background: help-scroll.t.tint; }
+                                        Text { text: help-scroll.t.title; font-size: 22px; font-weight: 700; color: Theme.fg; }
+                                    }
+                                    Text { text: help-scroll.t.intro; width: help-scroll.text-w; wrap: word-wrap; font-size: 14px; color: Theme.fg; }
+                                    Rectangle {
+                                        height: min(460px, (help-scroll.visible-width - 48px) * help-scroll.t.picture.height / max(1, help-scroll.t.picture.width));
+                                        border-radius: 8px;
+                                        background: Theme.bg;
+                                        Image {
+                                            source: help-scroll.t.picture;
+                                            image-fit: contain;
+                                            width: parent.width - 12px;
+                                            height: parent.height - 12px;
+                                        }
+                                    }
+                                    if help-scroll.t.steps.length > 0: Text { text: "Do these steps"; font-size: 15px; font-weight: 700; color: Theme.fg; }
+                                    for s[i] in help-scroll.t.steps: HorizontalLayout {
+                                        spacing: 10px;
+                                        Rectangle {
+                                            width: 22px;
+                                            height: 22px;
+                                            border-radius: 11px;
+                                            background: help-scroll.t.tint;
+                                            Text { text: i + 1; color: #ffffff; font-size: 12px; font-weight: 700; }
+                                        }
+                                        Text { text: s; width: help-scroll.text-w - 32px; wrap: word-wrap; font-size: 13px; color: Theme.fg; vertical-alignment: center; }
+                                    }
+                                    if help-scroll.t.notes.length > 0: Text { text: help-scroll.t.steps.length > 0 ? "Good to know" : "Problems and what to do"; font-size: 15px; font-weight: 700; color: Theme.fg; }
+                                    for n in help-scroll.t.notes: HorizontalLayout {
+                                        spacing: 10px;
+                                        Rectangle {
+                                            width: 22px;
+                                            Rectangle { width: 6px; height: 6px; y: 7px; border-radius: 3px; background: help-scroll.t.tint; }
+                                        }
+                                        Text { text: n; width: help-scroll.text-w - 32px; wrap: word-wrap; font-size: 13px; color: Theme.fg; }
+                                    }
+                                }
                             }
                         }
                     }
