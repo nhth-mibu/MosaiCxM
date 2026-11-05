@@ -348,6 +348,7 @@ export component AppWindow inherits Window {
     in-out property <string> motif-path;
     in-out property <string> motif-name;
     in-out property <image> motif-image;
+    in-out property <float> motif-aspect: 0; // width / height of the chosen picture, 0 = none
     in-out property <string> suggest-folder;
     in-out property <int> suggest-from-library: 30;
     in-out property <[SuggestionRow]> suggestions;
