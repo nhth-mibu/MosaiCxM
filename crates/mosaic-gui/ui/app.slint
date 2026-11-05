@@ -314,6 +314,23 @@ component BarChart inherits Rectangle {
     }
 }
 
+// Spinning wheel shown in the status bar while a job runs: 8 dots, the bright one goes round.
+component Spinner inherits Rectangle {
+    width: 18px;
+    height: 18px;
+    property <float> step: Math.mod(animation-tick() / 90ms, 8);
+    for i in 8: Rectangle {
+        property <angle> a: i * 45deg;
+        width: 4px;
+        height: 4px;
+        border-radius: 2px;
+        x: parent.width / 2 + 7px * Math.cos(a) - self.width / 2;
+        y: parent.height / 2 + 7px * Math.sin(a) - self.height / 2;
+        background: Theme.teal;
+        opacity: 0.2 + 0.8 * (1 - Math.mod(step - i + 8, 8) / 8);
+    }
+}
+
 export component AppWindow inherits Window {
     title: "MosaiCxM";
     preferred-width: 1280px;
@@ -1112,8 +1129,11 @@ export component AppWindow inherits Window {
                         height: parent.height;
                         width: root.progress-known ? parent.width * root.progress : (root.busy ? parent.width * 0.35 : 0);
                         background: @linear-gradient(90deg, Theme.teal 0%, Theme.violet 100%);
+                        // Pulse while working so it is clear the app has not frozen.
+                        opacity: root.busy ? 0.65 + 0.35 * Math.sin(animation-tick() / 1000ms * 360deg) : 1;
                     }
                 }
+                if root.busy: Spinner { y: 11px; }
                 Text { text: root.status; color: Theme.muted; font-size: 12px; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; }
                 if root.busy: Button { text: "Cancel"; clicked => { root.cancel(); } }
                 if !root.busy && root.photos-indexed: HorizontalLayout {
