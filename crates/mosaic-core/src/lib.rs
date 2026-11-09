@@ -6,6 +6,7 @@ pub mod catalog;
 pub mod color;
 pub mod decode;
 pub mod descriptor;
+pub mod faces;
 pub mod indexer;
 pub mod job;
 pub mod matching;

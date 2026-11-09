@@ -3,6 +3,7 @@
 //! library or folder only deletes catalogue rows.
 
 use crate::descriptor::{Descriptor, DESCRIPTOR_VERSION, GRID_BYTES};
+use crate::faces::{self, Face, FACES_VERSION};
 use anyhow::{anyhow, bail, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::HashMap;
@@ -96,6 +97,8 @@ pub struct PoolRow {
     pub height: u32,
     pub grid: Vec<u8>,
     pub dhash: u64,
+    /// Faces found while indexing (empty when none, or not yet detected).
+    pub faces: Vec<Face>,
 }
 
 pub struct Catalog {
@@ -133,6 +136,7 @@ CREATE TABLE IF NOT EXISTS descriptor(
   has_icc INTEGER NOT NULL,
   had_alpha INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS thumb(content_hash BLOB PRIMARY KEY, version INTEGER NOT NULL, jpeg BLOB NOT NULL);
+CREATE TABLE IF NOT EXISTS faces(content_hash BLOB PRIMARY KEY, version INTEGER NOT NULL, boxes BLOB NOT NULL);
 "#;
 
 impl Catalog {
@@ -305,6 +309,14 @@ impl Catalog {
         Ok(())
     }
 
+    pub fn put_faces(&self, h: &Hash, f: &[Face]) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO faces(content_hash, version, boxes) VALUES(?1, ?2, ?3)",
+            params![&h[..], FACES_VERSION, faces::encode(f)],
+        )?;
+        Ok(())
+    }
+
     pub fn thumb(&self, h: &Hash) -> Result<Option<Vec<u8>>> {
         Ok(self.conn.query_row("SELECT jpeg FROM thumb WHERE content_hash = ?1", [&h[..]], |r| r.get(0)).optional()?)
     }
@@ -313,9 +325,14 @@ impl Catalog {
         Ok(self
             .conn
             .query_row(
-                "SELECT width, height, grid, dhash FROM descriptor WHERE content_hash = ?1 AND version = ?2",
-                params![&h[..], DESCRIPTOR_VERSION],
-                |r| Ok(PoolRow { hash: *h, width: r.get(0)?, height: r.get(1)?, grid: r.get(2)?, dhash: r.get::<_, i64>(3)? as u64 }),
+                "SELECT d.width, d.height, d.grid, d.dhash, fc.boxes FROM descriptor d
+                 LEFT JOIN faces fc ON fc.content_hash = d.content_hash AND fc.version = ?3
+                 WHERE d.content_hash = ?1 AND d.version = ?2",
+                params![&h[..], DESCRIPTOR_VERSION, FACES_VERSION],
+                |r| {
+                    let boxes: Option<Vec<u8>> = r.get(4)?;
+                    Ok(PoolRow { hash: *h, width: r.get(0)?, height: r.get(1)?, grid: r.get(2)?, dhash: r.get::<_, i64>(3)? as u64, faces: boxes.map(|b| faces::decode(&b)).unwrap_or_default() })
+                },
             )
             .optional()?)
     }
@@ -324,7 +341,8 @@ impl Catalog {
     pub fn pool_rows(&self, libs: &[i64]) -> Result<Vec<PoolRow>> {
         let ids = libs.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(",");
         let sql = format!(
-            "SELECT d.content_hash, d.width, d.height, d.grid, d.dhash FROM descriptor d
+            "SELECT d.content_hash, d.width, d.height, d.grid, d.dhash, fc.boxes FROM descriptor d
+             LEFT JOIN faces fc ON fc.content_hash = d.content_hash AND fc.version = {FACES_VERSION}
              WHERE d.version = {DESCRIPTOR_VERSION} AND d.content_hash IN (
                SELECT f.content_hash FROM file f JOIN root r ON f.root_id = r.id
                WHERE f.status = 0 AND r.library_id IN ({ids}))
@@ -339,6 +357,7 @@ impl Catalog {
                 height: r.get(2)?,
                 grid: r.get(3)?,
                 dhash: r.get::<_, i64>(4)? as u64,
+                faces: r.get::<_, Option<Vec<u8>>>(5)?.map(|b| faces::decode(&b)).unwrap_or_default(),
             })
         })?;
         let v: Vec<PoolRow> = rows.collect::<Result<_, _>>()?;
@@ -383,6 +402,7 @@ impl Catalog {
     pub fn gc(&self) -> Result<usize> {
         let n = self.conn.execute("DELETE FROM descriptor WHERE content_hash NOT IN (SELECT content_hash FROM file WHERE content_hash IS NOT NULL)", [])?;
         self.conn.execute("DELETE FROM thumb WHERE content_hash NOT IN (SELECT content_hash FROM descriptor)", [])?;
+        self.conn.execute("DELETE FROM faces WHERE content_hash NOT IN (SELECT content_hash FROM descriptor)", [])?;
         Ok(n)
     }
 }

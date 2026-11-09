@@ -14,7 +14,8 @@
 use crate::color::{de2, Lab};
 use crate::descriptor::{self, crop_descriptor, crop_positions, crop_rect, key12, mean_lab, TileDesc, CELLS};
 use crate::job::Job;
-use crate::pool::Pool;
+use crate::faces;
+use crate::pool::{Pool, PoolPhoto};
 use crate::rng::SplitMix64;
 use anyhow::{bail, Result};
 use image::RgbImage;
@@ -77,6 +78,9 @@ pub struct MatchSettings {
     pub usage_penalty: f32,
     /// Also consider off-centre crops (start/end of the long side).
     pub crop_offsets: bool,
+    /// Place crops so faces found while indexing stay whole.
+    #[serde(default = "default_true")]
+    pub face_crop: bool,
     pub merge_near_duplicates: bool,
     pub seed: u64,
     /// Candidates retrieved per tile before reranking.
@@ -96,6 +100,7 @@ impl MatchSettings {
             repeat_radius: 2,
             usage_penalty: 0.0,
             crop_offsets: false,
+            face_crop: true,
             merge_near_duplicates: true,
             seed: 1,
             candidates: 48,
@@ -239,12 +244,36 @@ pub struct Candidate {
     pub mean: Lab,
 }
 
-pub fn build_candidates(pool: &Pool, tile_aspect: f32, crop_offsets: bool) -> Vec<Candidate> {
+fn default_true() -> bool {
+    true
+}
+
+/// Crop positions for one photo. With `face_crop`, the first position keeps
+/// its faces whole and other positions are kept only if they cut no face and
+/// hold as much face as the first.
+pub fn photo_crop_positions(p: &PoolPhoto, tile_aspect: f32, crop_offsets: bool, face_crop: bool) -> Vec<f32> {
+    let base = crop_positions(p.aspect(), tile_aspect, crop_offsets);
+    if !face_crop || p.faces.is_empty() {
+        return base.to_vec();
+    }
+    let Some(t) = faces::crop_t(p.aspect(), tile_aspect, &p.faces, base[0]) else { return base.to_vec() };
+    let held = faces::face_area_in(crop_rect(p.aspect(), tile_aspect, t), &p.faces);
+    let mut v = vec![t];
+    for &o in base {
+        let r = crop_rect(p.aspect(), tile_aspect, o);
+        if (o - t).abs() > 1e-3 && !faces::cuts_face(r, &p.faces) && faces::face_area_in(r, &p.faces) >= held - 1e-6 {
+            v.push(o);
+        }
+    }
+    v
+}
+
+pub fn build_candidates(pool: &Pool, tile_aspect: f32, crop_offsets: bool, face_crop: bool) -> Vec<Candidate> {
     pool.photos
         .par_iter()
         .enumerate()
         .flat_map_iter(|(i, p)| {
-            crop_positions(p.aspect(), tile_aspect, crop_offsets).iter().map(move |&t| {
+            photo_crop_positions(p, tile_aspect, crop_offsets, face_crop).into_iter().map(move |t| {
                 let crop = crop_rect(p.aspect(), tile_aspect, t);
                 let desc = crop_descriptor(&p.grid, crop);
                 Candidate { photo: i as u32, group: p.group, crop, mean: mean_lab(&desc), desc }
@@ -473,7 +502,7 @@ pub fn match_tiles_masked(
     let mut stats = MatchStats { pool_photos: pool.photos.len(), pool_groups: pool.group_count, tiles: placed_tiles, ..Default::default() };
     let t0 = Instant::now();
     job.report("building candidates", 0, 1);
-    let cands = build_candidates(pool, grid.tile_aspect(), s.crop_offsets);
+    let cands = build_candidates(pool, grid.tile_aspect(), s.crop_offsets, s.face_crop);
     let retrieval = Retrieval::build(&cands, s.method)?;
     stats.candidates = cands.len();
     stats.build_ms = ms(t0);
@@ -735,4 +764,32 @@ pub fn count_nearby_repeats(tiles: &[TileAssign], pool: &Pool, cols: u32, radius
         }
     }
     n
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::catalog::PoolRow;
+    use crate::faces::{cuts_face, Face};
+
+    fn photo(w: u32, h: u32, faces: Vec<Face>) -> Pool {
+        Pool::from_rows(vec![PoolRow { hash: [1; 32], width: w, height: h, grid: vec![128; descriptor::GRID_BYTES], dhash: 0, faces }], false)
+    }
+
+    #[test]
+    fn face_crop_keeps_a_low_face_and_drops_crops_that_cut_it() {
+        // 1:2 portrait, square tiles, face in the lower half.
+        let f = Face { rect: [0.3, 0.7, 0.3, 0.15], score: 1.0 };
+        let pool = photo(500, 1000, vec![f]);
+        let pos = photo_crop_positions(&pool.photos[0], 1.0, true, true);
+        assert!(!pos.is_empty());
+        for t in &pos {
+            assert!(!cuts_face(crop_rect(0.5, 1.0, *t), &[f]), "t={t}");
+        }
+        // Off: the usual top-biased positions, which miss this face.
+        assert_eq!(photo_crop_positions(&pool.photos[0], 1.0, true, false), vec![descriptor::TALL_CROP_T, 0.0]);
+        // No faces: unchanged.
+        let plain = photo(500, 1000, vec![]);
+        assert_eq!(photo_crop_positions(&plain.photos[0], 1.0, false, true), vec![descriptor::TALL_CROP_T]);
+    }
 }

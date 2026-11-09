@@ -1,6 +1,6 @@
 # Roadmap
 
-Planned work, in order. Nothing here is built yet.
+Planned work, in order.
 
 ## 1. AI features
 
@@ -9,7 +9,7 @@ Planned work, in order. Nothing here is built yet.
 These keep the app fully offline, as it is today.
 
 - **Smart content matching.** An image model such as CLIP sorts tiles by what they show, not only by colour. Faces go in the eyes, sky photos go in the sky, and so on.
-- **Face-aware cropping.** Tiles crop around faces and subjects, so nobody's head gets cut off.
+- **Face-aware cropping.** Done: tiles crop around faces, so nobody's head gets cut off (YuNet detector, offline). Subjects other than faces are still to do.
 - **Quality filter.** Skip blurry, near-duplicate and badly exposed photos automatically.
 
 ### Cloud (optional add-on)
