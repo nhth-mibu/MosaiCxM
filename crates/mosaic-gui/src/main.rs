@@ -765,7 +765,9 @@ fn check_folder(ui: &AppWindow, st: &Shared, path: PathBuf) {
                 let Ok(d) = decode_file(&p, Some(CHECK_THUMB_PX)) else { continue };
                 let (w, h) = d.image.dimensions();
                 let side = w.min(h).max(1) as f32;
-                let crop = [(w as f32 - side) / 2.0 / w as f32, (h as f32 - side) / 2.0 / h as f32, side / w as f32, side / h as f32];
+                // Same rule as mosaic tiles: tall photos keep the top.
+                let t = if h > w { mosaic_core::descriptor::TALL_CROP_T } else { 0.5 };
+                let crop = [(w as f32 - side) / 2.0 / w as f32, (h as f32 - side) * t / h as f32, side / w as f32, side / h as f32];
                 let Ok(t) = resize_crop(&d.image, crop, CHECK_THUMB_PX, CHECK_THUMB_PX) else { continue };
                 let buf = to_image(&t);
                 let _ = weak.upgrade_in_event_loop(move |ui| {
