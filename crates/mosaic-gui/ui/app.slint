@@ -663,6 +663,7 @@ export component AppWindow inherits Window {
     in-out property <int> repeat-radius: 2;
     in-out property <float> usage-penalty: 0;
     in-out property <bool> crop-offsets: false;
+    in-out property <bool> face-crop: true;
     in-out property <int> seed: 1;
     in-out property <float> color-correction: 0;
     in-out property <float> motif-blend: 0;
@@ -754,6 +755,7 @@ export component AppWindow inherits Window {
             notes: [
                 "The app can read JPEG, PNG, WebP and TIFF files.",
                 "Each time the app starts, it checks the folders again. It adds new photos and removes deleted photos.",
+                "The scan also finds faces in your photos, so the tiles do not cut off heads. After an update of the app, the first scan can take longer.",
                 "If a folder has a yellow box, the app cannot find the folder. Connect the drive again, or click Find it… and select the new location.",
                 "If the app skips some files, click why? to see the reason for each file.",
                 "Click Remove to stop using a folder. This does not delete your photos.",
@@ -867,6 +869,7 @@ export component AppWindow inherits Window {
                 "The app works for a long time: big mosaics need more time. The wheel in the status bar turns while the app works. To stop, click Cancel.",
                 "The printed pages do not fit together: print at 100% (Actual size), then measure the 50 mm square.",
                 "A folder shows \"Folder not found\": connect the drive again, or click Find it….",
+                "Heads are cut off in the tiles: in Advanced, tick Keep faces in frame. If the app is still scanning, wait until the scan is done, then click Update preview.",
             ],
         },
     ];
@@ -1203,6 +1206,7 @@ export component AppWindow inherits Window {
                                             Text { text: round(root.usage-penalty * 10) / 10; min-width: 28px; color: Theme.fg; vertical-alignment: center; }
                                         }
                                         TipCheck { text: "Try off-centre crops"; tip: "The app also tries to cut each photo away from its centre, if this gives a better match. This is slower."; checked <=> root.crop-offsets; toggled => { root.changed(); } }
+                                        TipCheck { text: "Keep faces in frame"; tip: "The app finds faces in your photos when it scans them. It cuts each photo so that the faces stay whole in the tile. Photos without faces keep their top part if they are tall."; checked <=> root.face-crop; toggled => { root.changed(); } }
                                         if root.shape-index > 0: Field {
                                             label: "Edge tiles";
                                             tip: "Tiles on the edge of the shape. A tile is used only if this much of it is inside the shape.";

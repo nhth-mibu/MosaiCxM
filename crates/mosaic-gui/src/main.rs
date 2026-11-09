@@ -247,6 +247,7 @@ fn read_settings(ui: &AppWindow) -> Result<(GridSpec, MatchSettings)> {
     s.repeat_radius = ui.get_repeat_radius().max(1) as u32;
     s.usage_penalty = if method == Method::Variety { ui.get_usage_penalty() } else { 0.0 };
     s.crop_offsets = ui.get_crop_offsets();
+    s.face_crop = ui.get_face_crop();
     s.seed = ui.get_seed().max(0) as u64;
     s.color_correction = ui.get_color_correction();
     s.motif_blend = ui.get_motif_blend();
@@ -505,6 +506,7 @@ fn show_project(ui: &AppWindow, s: &mut State, p: Project, buf: SharedPixelBuffe
         ui.set_repeat_radius(p.settings.repeat_radius as i32);
         ui.set_usage_penalty(p.settings.usage_penalty);
         ui.set_crop_offsets(p.settings.crop_offsets);
+        ui.set_face_crop(p.settings.face_crop);
         ui.set_seed(p.settings.seed as i32);
         ui.set_color_correction(p.settings.color_correction);
         ui.set_motif_blend(p.settings.motif_blend);

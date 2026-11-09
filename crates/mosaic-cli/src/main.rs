@@ -119,6 +119,9 @@ pub struct MatchArgs {
     /// Consider off-centre crops too.
     #[arg(long)]
     pub crop_offsets: Option<bool>,
+    /// Keep faces whole when cropping photos into tiles (default: true).
+    #[arg(long)]
+    pub face_crop: Option<bool>,
     #[arg(long, default_value_t = 1)]
     pub seed: u64,
     /// Bounded colour correction, 0–0.5 (off by default).
@@ -317,6 +320,9 @@ pub fn settings_from(m: &MatchArgs) -> Result<(GridSpec, MatchSettings)> {
     }
     if let Some(v) = m.crop_offsets {
         s.crop_offsets = v;
+    }
+    if let Some(v) = m.face_crop {
+        s.face_crop = v;
     }
     if let Some(v) = m.candidates {
         s.candidates = v;

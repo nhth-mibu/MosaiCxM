@@ -83,6 +83,7 @@ struct Analysis {
     thumb: Vec<u8>,
     has_icc: bool,
     had_alpha: bool,
+    faces: Vec<crate::faces::Face>,
 }
 
 pub fn update_library(cat: &Catalog, lib: i64, opts: &IndexOptions, job: &Job) -> Result<IndexReport> {
@@ -90,9 +91,12 @@ pub fn update_library(cat: &Catalog, lib: i64, opts: &IndexOptions, job: &Job) -
     let mut rep = IndexReport::default();
     let pool = rayon::ThreadPoolBuilder::new().num_threads(opts.threads.max(1)).build()?;
     let mut known: HashSet<Hash> = {
-        let mut st = cat.conn.prepare("SELECT content_hash FROM descriptor WHERE version = ?1")?;
+        // A photo is fully analysed when it has a current descriptor and faces.
+        let mut st = cat.conn.prepare(
+            "SELECT d.content_hash FROM descriptor d JOIN faces f ON f.content_hash = d.content_hash AND f.version = ?2 WHERE d.version = ?1",
+        )?;
         let v = st
-            .query_map([descriptor::DESCRIPTOR_VERSION], |r| r.get::<_, Vec<u8>>(0))?
+            .query_map([descriptor::DESCRIPTOR_VERSION, crate::faces::FACES_VERSION], |r| r.get::<_, Vec<u8>>(0))?
             .filter_map(|r| r.ok().and_then(|v| v.try_into().ok()))
             .collect();
         v
@@ -150,6 +154,7 @@ pub fn update_library(cat: &Catalog, lib: i64, opts: &IndexOptions, job: &Job) -
                     WorkResult::Ok { hash, attribution, exif, analysis } => {
                         if let Some(a) = analysis {
                             cat.put_descriptor(&hash, &a.desc, a.has_icc, a.had_alpha, &a.thumb)?;
+                            cat.put_faces(&hash, &a.faces)?;
                             rep.decoded += 1;
                         } else {
                             rep.reused_descriptors += 1;
@@ -309,7 +314,8 @@ fn process_file(path: &Path, known: &HashSet<Hash>) -> WorkResult {
 }
 
 fn analyse(bytes: &[u8]) -> Result<Analysis> {
-    let d = decode::decode_bytes(bytes, Some(ANALYSIS_SHORT_SIDE))?;
+    // Large enough for the face detector; the descriptor averages it down anyway.
+    let d = decode::decode_bytes(bytes, Some(ANALYSIS_SHORT_SIDE.max(crate::faces::DECODE_SHORT_SIDE)))?;
     let (w, h) = d.image.dimensions();
     if w < 2 || h < 2 {
         anyhow::bail!("image too small ({w}x{h})");
@@ -319,7 +325,9 @@ fn analyse(bytes: &[u8]) -> Result<Analysis> {
     let (tw, th) = if s < 1.0 { (((w as f64 * s).round() as u32).max(1), ((h as f64 * s).round() as u32).max(1)) } else { (w, h) };
     let thumb_img = if (tw, th) == (w, h) { d.image.clone() } else { decode::resize_crop(&d.image, [0.0, 0.0, 1.0, 1.0], tw, th)? };
     let thumb = decode::encode_jpeg(&thumb_img, 85)?;
-    Ok(Analysis { desc, thumb, has_icc: d.info.has_icc, had_alpha: d.info.had_alpha })
+    // A detector failure must not drop the photo: it is then used without faces.
+    let faces = crate::faces::detect(&d.image).unwrap_or_default();
+    Ok(Analysis { desc, thumb, has_icc: d.info.has_icc, had_alpha: d.info.had_alpha, faces })
 }
 
 type AttributionPair = (Option<String>, Option<String>);

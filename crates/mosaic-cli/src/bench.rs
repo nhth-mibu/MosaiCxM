@@ -75,7 +75,7 @@ pub fn synthetic_pool(n: usize, seed: u64) -> Pool {
             let mut hash = [0u8; 32];
             hash[..8].copy_from_slice(&(i as u64).to_le_bytes());
             let (w, h) = if r.below(3) == 0 { (3000, 4000) } else { (4000, 3000) };
-            PoolRow { hash, width: w, height: h, grid: synth_grid(&mut r), dhash: r.next_u64() }
+            PoolRow { hash, width: w, height: h, grid: synth_grid(&mut r), dhash: r.next_u64(), faces: Vec::new() }
         })
         .collect();
     Pool::from_rows(rows, true)
@@ -102,7 +102,7 @@ fn bench_match(photos: usize, cols: u32, rows: u32, seed: u64, brute_tiles: usiz
     for method in [Method::Classic, Method::Structure] {
         let s = MatchSettings::for_method(method);
         let t = Instant::now();
-        let cands = build_candidates(&pool, grid.tile_aspect(), s.crop_offsets);
+        let cands = build_candidates(&pool, grid.tile_aspect(), s.crop_offsets, s.face_crop);
         let build_c = t.elapsed().as_secs_f64() * 1000.0;
         let t = Instant::now();
         let r = Retrieval::build(&cands, method)?;
