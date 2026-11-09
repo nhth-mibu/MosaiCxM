@@ -135,6 +135,7 @@ The notes explain the result in plain words, for example "strong colour coverage
 - **Bounded resources.** A fixed worker pool works through batches of 128 files. JPEGs are decoded with DCT scaling (to ~128 px for analysis), decode allocations are capped at 768 MB, and thumbnails are 96 px JPEGs.
 - **Stored per photo:** a 16×16 Lab grid of the whole frame (768 B), a 64-bit dHash, the upright size, and a 96 px thumbnail. Descriptors carry `DESCRIPTOR_VERSION`. When it is bumped, they are recomputed on the next update. EXIF fields carry a separate `META_VERSION`, which triggers a re-read without decoding.
 - **Crop/aspect.** Because the grid covers the uncropped frame, the descriptor for any tile aspect and crop position is derived on the fly. Photos are never decoded again for matching or previews.
+- **Crop position.** Wide photos are cut from the centre. Tall photos are cut near the top (`TALL_CROP_T` = 0.2 along the free height), because heads are near the top of most portraits. With off-centre crops on, wide photos also try the left and right ends, and tall photos also try the very top, but never the bottom.
 - **Storage split.** Source photos stay in their folders and are never modified. Cached analysis is in `catalog.sqlite` in the data folder. Projects are JSON files saved wherever you choose.
 
 ## Projects

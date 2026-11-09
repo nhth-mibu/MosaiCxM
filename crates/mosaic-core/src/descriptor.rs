@@ -118,12 +118,25 @@ pub fn crop_rect(photo_aspect: f32, tile_aspect: f32, t: f32) -> [f32; 4] {
     }
 }
 
-/// Crop positions considered for a photo. Centre only unless the crop discards
-/// a substantial part of the frame.
+/// Crop position used when a photo is cut along its height (it is taller than
+/// the tile). Heads are near the top of most portraits, so the crop keeps the
+/// top and loses more of the bottom than a centre crop would.
+pub const TALL_CROP_T: f32 = 0.2;
+
+/// Crop positions considered for a photo. One default position (centre for
+/// wide photos, near the top for tall ones) unless offsets are allowed and the
+/// crop discards a substantial part of the frame. Tall photos never get a
+/// bottom crop, as it would cut off heads.
 pub fn crop_positions(photo_aspect: f32, tile_aspect: f32, allow_offsets: bool) -> &'static [f32] {
+    let tall = photo_aspect < tile_aspect;
     let r = crop_rect(photo_aspect, tile_aspect, 0.5);
-    let kept = r[2] * r[3];
-    if allow_offsets && kept < 0.8 { &[0.5, 0.0, 1.0] } else { &[0.5] }
+    let offsets = allow_offsets && r[2] * r[3] < 0.8;
+    match (tall, offsets) {
+        (false, false) => &[0.5],
+        (false, true) => &[0.5, 0.0, 1.0],
+        (true, false) => &[TALL_CROP_T],
+        (true, true) => &[TALL_CROP_T, 0.0],
+    }
 }
 
 /// Derive the 4×4 Lab tile descriptor of a crop from a stored 16×16 grid.
@@ -219,6 +232,18 @@ mod tests {
         assert_eq!(r, [0.0, 0.0, 1.0, 0.5]);
         let r = crop_rect(1.0, 1.0, 0.5);
         assert_eq!(r, [0.0, 0.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn tall_photos_keep_the_top() {
+        // Portrait 2:3 into a square tile: default crop is near the top, never the bottom.
+        assert_eq!(crop_positions(2.0 / 3.0, 1.0, false), &[TALL_CROP_T]);
+        assert_eq!(crop_positions(2.0 / 3.0, 1.0, true), &[TALL_CROP_T, 0.0]);
+        let r = crop_rect(2.0 / 3.0, 1.0, TALL_CROP_T);
+        assert!(r[1] < 0.07, "top cut {}", r[1]);
+        // Wide photos stay centred and may slide both ways.
+        assert_eq!(crop_positions(1.5, 1.0, false), &[0.5]);
+        assert_eq!(crop_positions(1.5, 1.0, true), &[0.5, 0.0, 1.0]);
     }
 
     #[test]
