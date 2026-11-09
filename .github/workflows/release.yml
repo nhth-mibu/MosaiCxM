@@ -4,8 +4,12 @@ name: Release
 # Windows x64, macOS Apple silicon (.dmg) and Linux x64.
 #
 # - Push a tag like `v0.1.0` to build and publish a GitHub Release.
-# - Run it by hand (Actions > Release > Run workflow) to only build; the
-#   files are then available as workflow artifacts.
+# - Or run it by hand (Actions > Release > Run workflow) with a version
+#   like `v0.7.2`: it builds the chosen branch, creates that tag and
+#   publishes the release. This is how Claude releases, since it cannot
+#   push tags.
+# - Run it by hand with no version to only build; the files are then
+#   available as workflow artifacts.
 # - The macOS app is ad-hoc signed, not notarized. First launch needs
 #   right-click > Open (or `xattr -dr com.apple.quarantine MosaiCxM.app`).
 
@@ -13,6 +17,11 @@ on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      version:
+        description: "Tag to create and publish, like v0.7.2. Leave empty to only build."
+        required: false
+        default: ""
   # Test-build when this workflow changes; nothing is published.
   pull_request:
     paths: [".github/workflows/release.yml"]
@@ -50,8 +59,16 @@ jobs:
 
       - name: Set version
         shell: bash
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
         run: |
-          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+          if [[ -n "$INPUT_VERSION" ]]; then
+            if [[ ! "$INPUT_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+              echo "::error::Version must look like v1.2.3, got '$INPUT_VERSION'"
+              exit 1
+            fi
+            echo "VERSION=${INPUT_VERSION}" >> "$GITHUB_ENV"
+          elif [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
             echo "VERSION=${GITHUB_REF_NAME}" >> "$GITHUB_ENV"
           else
             echo "VERSION=dev-${GITHUB_SHA::7}" >> "$GITHUB_ENV"
@@ -153,9 +170,20 @@ jobs:
   release:
     name: Publish release
     needs: build
-    if: github.ref_type == 'tag'
+    if: github.ref_type == 'tag' || inputs.version != ''
     runs-on: ubuntu-latest
+    env:
+      TAG: ${{ inputs.version || github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
     steps:
+      - name: Refuse to reuse an existing release
+        if: inputs.version != ''
+        run: |
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::error::Release $TAG already exists"
+            exit 1
+          fi
+
       - uses: actions/download-artifact@v8
         with:
           path: dist
@@ -163,7 +191,9 @@ jobs:
 
       - uses: softprops/action-gh-release@v3
         with:
+          tag_name: ${{ env.TAG }}
+          target_commitish: ${{ github.sha }}
           files: dist/*
           generate_release_notes: true
           draft: false
-          prerelease: ${{ contains(github.ref_name, '-') }}
+          prerelease: ${{ contains(env.TAG, '-') }}
