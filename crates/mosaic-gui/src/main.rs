@@ -31,6 +31,7 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+mod update;
 mod zoom;
 
 slint::include_modules!();
@@ -1401,8 +1402,92 @@ fn main() -> Result<()> {
             }
         });
     }
+    setup_updates(&ui, st.lock().unwrap().data_dir.clone());
     ui.run()?;
     Ok(())
+}
+
+/// Help menu items and the "new version" bar. Checks once at start unless
+/// the user turned that off (development builds never check at start).
+fn setup_updates(ui: &AppWindow, dir: PathBuf) {
+    let prefs = update::Prefs::load(&dir);
+    ui.set_app_version(update::current_version().unwrap_or("").into());
+    ui.set_check_updates_at_start(prefs.check_on_start);
+    let dir = Rc::new(dir);
+    {
+        let d = dir.clone();
+        ui.on_check_at_start_changed(move |on| {
+            let mut p = update::Prefs::load(&d);
+            p.check_on_start = on;
+            p.save(&d);
+        });
+    }
+    {
+        let w = ui.as_weak();
+        let d = dir.clone();
+        ui.on_check_updates(move || {
+            if let Some(ui) = w.upgrade() {
+                start_update_check(&ui, &d, true);
+            }
+        });
+    }
+    {
+        let w = ui.as_weak();
+        ui.on_update_download(move || {
+            let Some(ui) = w.upgrade() else { return };
+            let url = update::release_page(&ui.get_update_version());
+            if webbrowser::open(&url).is_err() {
+                ui.set_notice(format!("Cannot open your web browser. To download the new version, go to {url}").into());
+            }
+        });
+    }
+    {
+        let w = ui.as_weak();
+        let d = dir.clone();
+        ui.on_update_ignore(move || {
+            let Some(ui) = w.upgrade() else { return };
+            let mut p = update::Prefs::load(&d);
+            p.ignored = ui.get_update_version().to_string();
+            p.save(&d);
+            ui.set_update_message("".into());
+            ui.set_update_version("".into());
+        });
+    }
+    if prefs.check_on_start && update::current_version().is_some() {
+        start_update_check(ui, &dir, false);
+    }
+}
+
+/// Asks GitHub for the latest release on a background thread. A check at
+/// start stays silent unless there is a new version the user did not
+/// ignore; a check from the menu always says what it found.
+fn start_update_check(ui: &AppWindow, dir: &Path, manual: bool) {
+    if ui.get_update_checking() {
+        return;
+    }
+    ui.set_update_checking(true);
+    let ignored = update::Prefs::load(dir).ignored;
+    let weak = ui.as_weak();
+    std::thread::spawn(move || {
+        let latest = update::fetch_latest();
+        let _ = weak.upgrade_in_event_loop(move |ui| {
+            ui.set_update_checking(false);
+            let (msg, version) = match (latest, update::current_version()) {
+                (Ok(r), Some(cur)) if update::is_newer(&r.version, cur) => {
+                    if !manual && r.version == ignored {
+                        return;
+                    }
+                    (format!("Version {} of MosaiCxM is available. You have version {cur}.", r.version), r.version)
+                }
+                _ if !manual => return,
+                (Ok(_), Some(cur)) => (format!("You have the latest version of MosaiCxM ({cur})."), String::new()),
+                (Ok(r), None) => (format!("This is a development build. The latest release is version {}.", r.version), r.version),
+                (Err(_), _) => ("Cannot check for updates. Make sure that you are connected to the internet, then try again.".to_string(), String::new()),
+            };
+            ui.set_update_message(msg.into());
+            ui.set_update_version(version.into());
+        });
+    });
 }
 
 /// Writes `<name>-photos-used.csv` next to an export.

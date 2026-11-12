@@ -18,7 +18,9 @@ Download the latest version from the [Releases page](https://github.com/nhth-mib
 
 The app has five steps. Each step has its own colour, so you always know where you are. The preview of your mosaic stays on the right the whole time.
 
-Need help in the app? Point at a control and wait a moment: a tooltip tells you what it does. A small **?** marks the settings that have one. Click **Help** at the top right for short guides with screenshots for each step, printing, and common problems.
+Need help in the app? Point at a control and wait a moment: a tooltip tells you what it does. A small **?** marks the settings that have one. Click **Help** at the top right, then **Help topics**, for short guides with screenshots for each step, printing, and common problems.
+
+When a new version is out, the app shows a blue bar above the preview with a **Download** button. It asks GitHub once at start (nothing else is sent). To check by hand, click **Help** > **Check for updates**. To turn off the check at start, untick **Help** > **Check for updates at start**.
 
 | Step | Colour | What you do |
 |---|---|---|

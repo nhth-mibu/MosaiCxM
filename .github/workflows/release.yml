@@ -90,6 +90,9 @@ jobs:
           key: ${{ matrix.target }}
 
       - name: Build
+        # The app reads MOSAIC_VERSION at compile time for its update check.
+        env:
+          MOSAIC_VERSION: ${{ env.VERSION }}
         run: cargo build --release --locked --target ${{ matrix.target }} -p mosaic-gui
 
       - name: Package (Linux)
