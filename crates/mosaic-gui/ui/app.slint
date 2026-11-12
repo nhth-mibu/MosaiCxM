@@ -242,6 +242,32 @@ component LinkButton inherits Text {
     ta := TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
 }
 
+// One row of the Help menu. `mark` shows a tick for on/off items.
+component MenuRow inherits Rectangle {
+    in property <string> text;
+    in property <string> mark;
+    in property <bool> enabled: true;
+    callback clicked();
+    height: 32px;
+    border-radius: 4px;
+    background: ma.has-hover && root.enabled ? Theme.line : transparent;
+    accessible-role: button;
+    accessible-label: root.text;
+    accessible-action-default => { root.clicked(); }
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 10px;
+        spacing: 6px;
+        Text { width: 16px; text: root.mark; color: Theme.teal; font-weight: 700; font-size: 13px; vertical-alignment: center; }
+        Text { text: root.text; color: root.enabled ? Theme.fg : Theme.muted; font-size: 13px; vertical-alignment: center; }
+    }
+    ma := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
 // Collapsible "Advanced" box inside a step card: its own background and a
 // border in the step colour, so it stands out from the card around it.
 // Put the content in as `if root.<flag>: VerticalLayout { ... }`.
@@ -738,6 +764,7 @@ export component AppWindow inherits Window {
                 "The app saves your work automatically. When you start the app again, it opens your last mosaic.",
                 "To look closer at the preview, scroll or double-click it. Drag it to move. Click the percentage to see the full mosaic again.",
                 "To keep a mosaic as a file, click Save as…. To use it again, click Open….",
+                "When a new version of the app is available, a blue bar shows above the preview. Click Download to get it. To check now, click Help, then Check for updates.",
                 "When you change a setting, the preview shows \"Settings changed since this preview\". Click Update preview to see the change.",
             ],
         },
@@ -874,6 +901,17 @@ export component AppWindow inherits Window {
         },
     ];
 
+    // ----- update check (Help menu, and the blue bar above the preview)
+    in-out property <string> app-version; // "" for a development build
+    in-out property <bool> check-updates-at-start: true;
+    in-out property <bool> update-checking: false;
+    in-out property <string> update-message; // "" hides the bar
+    in-out property <string> update-version; // newer version to download, "" when there is none
+    callback check-updates();
+    callback check-at-start-changed(bool);
+    callback update-download();
+    callback update-ignore();
+
     // ----- job status
     in-out property <bool> busy: false;
     in-out property <string> status: "Ready";
@@ -939,7 +977,7 @@ export component AppWindow inherits Window {
                 }
                 Text { text: "MosaiCxM"; horizontal-stretch: 0; color: #ffffff; font-size: 18px; font-weight: 700; vertical-alignment: center; }
                 Text { text: root.project-name; color: #b8c0d0; font-size: 13px; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; }
-                for item[i] in ["Open…", "Save as…", "Help"]: Rectangle {
+                for item[i] in ["Open…", "Save as…", "Help ▾"]: Rectangle {
                     width: t.preferred-width + 24px;
                     height: 32px;
                     y: 10px;
@@ -952,7 +990,50 @@ export component AppWindow inherits Window {
                         clicked => {
                             if (i == 0) { root.open-project(); }
                             else if (i == 1) { root.save-project(); }
-                            else { root.main-view = root.main-view == 5 ? 0 : 5; }
+                            else { help-menu.show(); }
+                        }
+                    }
+                }
+            }
+
+            help-menu := PopupWindow {
+                x: parent.width - self.width - 12px;
+                y: 46px;
+                width: 260px;
+                Rectangle {
+                    background: Theme.surface;
+                    border-radius: 8px;
+                    border-width: 1px;
+                    border-color: Theme.line;
+                    drop-shadow-blur: 12px;
+                    drop-shadow-color: #00000040;
+                    VerticalLayout {
+                        padding: 6px;
+                        spacing: 2px;
+                        MenuRow { text: "Help topics"; clicked => { root.main-view = 5; } }
+                        MenuRow {
+                            text: root.update-checking ? "Checking for updates…" : "Check for updates";
+                            enabled: !root.update-checking;
+                            clicked => { root.check-updates(); }
+                        }
+                        MenuRow {
+                            text: "Check for updates at start";
+                            mark: root.check-updates-at-start ? "✓" : "";
+                            clicked => {
+                                root.check-updates-at-start = !root.check-updates-at-start;
+                                root.check-at-start-changed(root.check-updates-at-start);
+                            }
+                        }
+                        Rectangle { height: 1px; background: Theme.line; }
+                        HorizontalLayout {
+                            padding-left: 30px;
+                            height: 26px;
+                            Text {
+                                text: root.app-version == "" ? "MosaiCxM (development build)" : "MosaiCxM " + root.app-version;
+                                color: Theme.muted;
+                                font-size: 12px;
+                                vertical-alignment: center;
+                            }
                         }
                     }
                 }
@@ -1369,6 +1450,32 @@ export component AppWindow inherits Window {
                 padding: 16px;
                 spacing: 10px;
                 horizontal-stretch: 1;
+
+                if root.update-message != "": Rectangle {
+                    border-radius: 8px;
+                    background: Theme.blue-soft;
+                    border-width: 1px;
+                    border-color: Theme.blue;
+                    HorizontalLayout {
+                        padding: 10px;
+                        spacing: 12px;
+                        Text { text: root.update-message; color: Theme.fg; font-size: 13px; wrap: word-wrap; horizontal-stretch: 1; vertical-alignment: center; }
+                        if root.update-version != "": Tipped {
+                            tip: "Open the download page in your web browser.";
+                            ColorButton { text: "Download"; tint: Theme.blue; clicked => { root.update-download(); } }
+                        }
+                        if root.update-version != "": LinkButton {
+                            text: "Ignore this version";
+                            vertical-alignment: center;
+                            clicked => { root.update-ignore(); }
+                        }
+                        LinkButton {
+                            text: root.update-version != "" ? "Later" : "OK";
+                            vertical-alignment: center;
+                            clicked => { root.update-message = ""; }
+                        }
+                    }
+                }
 
                 if root.notice != "": Rectangle {
                     border-radius: 8px;
