@@ -14,13 +14,56 @@
 use anyhow::{anyhow, bail, Context, Result};
 use image::metadata::Orientation;
 use image::{DynamicImage, ImageDecoder, RgbImage};
+use std::cell::Cell;
 use std::io::Cursor;
 use std::path::Path;
+use std::sync::{Condvar, Mutex};
 
 /// Refuse to allocate more than this for one decoded image.
 pub const MAX_DECODE_BYTES: u64 = 768 * 1024 * 1024;
 /// Refuse to read files larger than this.
 pub const MAX_FILE_BYTES: u64 = 512 * 1024 * 1024;
+
+/// Memory that large decodes running at the same time may use together.
+/// Indexing and export decode on every core; without a limit, a folder of
+/// big scans (PNG/TIFF have no reduced-size decoding) can use many GB at once.
+/// A decode larger than the whole budget still runs, but alone.
+pub const DECODE_BUDGET_BYTES: u64 = 2 << 30;
+/// Decodes smaller than this are not counted (most photos when indexing).
+const GATE_MIN_BYTES: u64 = 64 << 20;
+
+static GATE_USED: Mutex<u64> = Mutex::new(0);
+static GATE_FREED: Condvar = Condvar::new();
+thread_local! {
+    /// This thread already holds a permit. A nested decode on the same thread
+    /// (rayon work stealing) must not wait for its own permit.
+    static HOLDS_PERMIT: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Share of [`DECODE_BUDGET_BYTES`] held while one large image is decoded.
+struct Permit(u64);
+
+fn acquire(bytes: u64) -> Option<Permit> {
+    if bytes < GATE_MIN_BYTES || HOLDS_PERMIT.get() {
+        return None;
+    }
+    let mut used = GATE_USED.lock().unwrap_or_else(|e| e.into_inner());
+    while *used > 0 && *used + bytes > DECODE_BUDGET_BYTES {
+        used = GATE_FREED.wait(used).unwrap_or_else(|e| e.into_inner());
+    }
+    *used += bytes;
+    HOLDS_PERMIT.set(true);
+    Some(Permit(bytes))
+}
+
+impl Drop for Permit {
+    fn drop(&mut self) {
+        let mut used = GATE_USED.lock().unwrap_or_else(|e| e.into_inner());
+        *used -= self.0;
+        HOLDS_PERMIT.set(false);
+        GATE_FREED.notify_all();
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Format {
@@ -101,6 +144,10 @@ fn decode_jpeg(bytes: &[u8], min_short_side: Option<u32>) -> Result<Decoded> {
             dec.scale(rw, rh).map_err(|e| anyhow!("JPEG scale: {e}"))?;
         }
     }
+    // Output size after DCT scaling (scale() rounds up to 1/8 steps), with room
+    // for the colour conversion and orientation copies.
+    let (ow, oh) = dec.info().map(|i| (i.width as u64, i.height as u64)).unwrap_or((sw as u64, sh as u64));
+    let _permit = acquire(ow * oh * 3 * 3);
     let icc = dec.icc_profile();
     let pixels = dec.decode().map_err(|e| anyhow!("corrupt JPEG: {e}"))?;
     let info = dec.info().ok_or_else(|| anyhow!("corrupt JPEG"))?;
@@ -159,9 +206,11 @@ fn decode_generic(bytes: &[u8], f: Format) -> Result<Decoded> {
     let orientation = dec.orientation().unwrap_or(Orientation::NoTransforms);
     let icc = dec.icc_profile().ok().flatten();
     let had_alpha = dec.color_type().has_alpha();
+    let (w, h) = dec.dimensions();
+    let _permit = acquire(dec.total_bytes().saturating_add(w as u64 * h as u64 * 3 * 2));
     let img = DynamicImage::from_decoder(dec).map_err(|e| anyhow!("corrupt {f:?}: {e}"))?;
     let (sw, sh) = (img.width(), img.height());
-    let mut rgb = if had_alpha { composite_over_white(&img) } else { img.into_rgb8() };
+    let mut rgb = if had_alpha { composite_over_white(img) } else { img.into_rgb8() };
     let icc_converted = match &icc {
         Some(p) => apply_icc(&mut rgb, p),
         None => false,
@@ -176,8 +225,9 @@ fn decode_generic(bytes: &[u8], f: Format) -> Result<Decoded> {
     })
 }
 
-fn composite_over_white(img: &DynamicImage) -> RgbImage {
-    let rgba = img.to_rgba8();
+fn composite_over_white(img: DynamicImage) -> RgbImage {
+    // into_rgba8 reuses the buffer of an 8-bit RGBA image instead of copying it.
+    let rgba = img.into_rgba8();
     let (w, h) = rgba.dimensions();
     let mut out = RgbImage::new(w, h);
     for (o, p) in out.pixels_mut().zip(rgba.pixels()) {
@@ -199,11 +249,16 @@ fn apply_icc(img: &mut RgbImage, icc: &[u8]) -> bool {
     let Ok(t) = src.create_transform_8bit(moxcms::Layout::Rgb, &dst, moxcms::Layout::Rgb, moxcms::TransformOptions::default()) else {
         return false;
     };
-    let mut out = vec![0u8; img.as_raw().len()];
-    if t.transform(img.as_raw(), &mut out).is_err() {
-        return false;
+    // Convert in slices, so a large image is not copied whole.
+    const CHUNK: usize = 3 * 64 * 1024;
+    let mut out = vec![0u8; CHUNK.min(img.as_raw().len())];
+    for c in img.chunks_mut(CHUNK) {
+        let o = &mut out[..c.len()];
+        if t.transform(c, o).is_err() {
+            return false;
+        }
+        c.copy_from_slice(o);
     }
-    img.copy_from_slice(&out);
     true
 }
 
@@ -384,6 +439,45 @@ mod tests {
         let ((artist, _), ex) = crate::indexer::read_exif(&out.into_inner());
         assert_eq!(artist.as_deref(), Some("Nhat"));
         assert_eq!(ex.camera.as_deref(), Some("Nikon Z 8"));
+    }
+
+    #[test]
+    fn large_decodes_share_a_memory_budget() {
+        // Small decodes are not counted; a nested decode on the same thread does not wait.
+        assert!(acquire(1 << 20).is_none());
+        let a = acquire(DECODE_BUDGET_BYTES * 3 / 4).expect("first large decode runs");
+        assert!(acquire(DECODE_BUDGET_BYTES).is_none());
+        // Another thread waits until the first permit is given back.
+        let (tx, rx) = std::sync::mpsc::channel();
+        let t = std::thread::spawn(move || {
+            let p = acquire(DECODE_BUDGET_BYTES / 2);
+            tx.send(()).unwrap();
+            drop(p);
+        });
+        assert!(rx.recv_timeout(std::time::Duration::from_millis(200)).is_err(), "second decode must wait");
+        drop(a);
+        rx.recv_timeout(std::time::Duration::from_secs(5)).expect("second decode runs after the first");
+        t.join().unwrap();
+        // One image larger than the whole budget still runs on its own.
+        assert!(acquire(DECODE_BUDGET_BYTES * 2).is_some());
+    }
+
+    #[test]
+    fn rgba_png_with_icc_is_converted() {
+        let rgba = image::RgbaImage::from_pixel(300, 300, image::Rgba([200, 100, 50, 255]));
+        let mut bytes = Vec::new();
+        DynamicImage::ImageRgba8(rgba).write_to(&mut Cursor::new(&mut bytes), image::ImageFormat::Png).unwrap();
+        let d = decode_bytes(&bytes, None).unwrap();
+        assert_eq!(d.image.get_pixel(299, 299).0, [200, 100, 50]);
+        // sRGB to sRGB in slices leaves the pixels as they were.
+        let mut img = d.image.clone();
+        let srgb = moxcms::ColorProfile::new_srgb().encode().unwrap();
+        assert!(apply_icc(&mut img, &srgb));
+        for (a, b) in img.pixels().zip(d.image.pixels()) {
+            for c in 0..3 {
+                assert!((a[c] as i32 - b[c] as i32).abs() <= 1);
+            }
+        }
     }
 
     #[test]

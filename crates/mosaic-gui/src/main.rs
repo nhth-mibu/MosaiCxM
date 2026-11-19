@@ -105,6 +105,15 @@ fn thousands(n: u64) -> String {
     out
 }
 
+/// Runs `f`, turning a panic into an error. Without this, a panic on a worker
+/// thread would leave the window busy forever, with no message.
+fn catch_panic<T>(f: impl FnOnce() -> Result<T>) -> Result<T> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).unwrap_or_else(|p| {
+        let msg = p.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| p.downcast_ref::<String>().cloned()).unwrap_or_else(|| "unknown error".into());
+        Err(anyhow::anyhow!("internal error ({msg}). Please report this problem"))
+    })
+}
+
 /// Run `work` on a worker thread with progress, cancellation and error display.
 fn run_job(ui: &AppWindow, st: &Shared, label: &str, work: impl FnOnce(&Job, PathBuf) -> Result<Apply> + Send + 'static) {
     let weak = ui.as_weak();
@@ -132,7 +141,7 @@ fn run_job(ui: &AppWindow, st: &Shared, label: &str, work: impl FnOnce(&Job, Pat
     let label = label.to_string();
     std::thread::spawn(move || {
         let t = Instant::now();
-        let r = work(&job, dd);
+        let r = catch_panic(|| work(&job, dd));
         let secs = t.elapsed().as_secs_f64();
         let _ = weak.upgrade_in_event_loop(move |ui| {
             let mut s = st2.lock().unwrap();
@@ -604,7 +613,7 @@ fn sharpen_preview(ui: &AppWindow, st: &Shared, view: zoom::View) {
     ui.set_preview_sharpening(true);
     let (weak, st) = (ui.as_weak(), st.clone());
     std::thread::spawn(move || {
-        let r = src.render(&plan, &job);
+        let r = catch_panic(|| src.render(&plan, &job));
         let _ = weak.upgrade_in_event_loop(move |ui| {
             let mut s = st.lock().unwrap();
             if s.zoom_gen != ticket {

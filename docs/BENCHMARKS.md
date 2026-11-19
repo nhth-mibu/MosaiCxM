@@ -55,6 +55,27 @@ $P $M bench match --photos 100000 --cols 150 --rows 150 --seed 1 --brute-tiles 2
 | Re-scan, nothing changed | 1.5 s | 45 MB | size + mtime check only |
 | Re-scan, 1,000 files touched (mtime changed, content same) | 1.9 s | – | re-hashed, 1,000 cached descriptors reused, 0 decoded |
 
+### Robustness and speed review (2026-11-19)
+
+Same 4-CPU VM, release build. Face detection (added 2026-11-09) now takes most
+of the indexing time, so the 100,000-photo numbers above are too fast for the
+current version.
+
+| Test | Before | After |
+|---|---|---|
+| Index 2,000 synthetic 640 × 480 JPEGs | 263 photos/s | 316 photos/s |
+| Face detector, per photo (one thread) | 12.2 ms | 9.3 ms |
+| Index 8 PNG scans, 10,000 × 8,000 px with transparency (4 threads) | 3.3 GB peak RSS | 1.6 GB peak RSS |
+| Match 2,000,000 tiles, structure, unlimited reuse | 1.68 GB, assignment 1.56 s | 1.37 GB, assignment 0.37 s (same result) |
+
+The face detector now runs on an input that fits the photo shape (for
+example 320 × 224 for a 3:2 photo) instead of a letterboxed 320 × 320 square.
+On 54 test pictures it found 79 of the 80 faces it found before; the boxes
+moved by less than 1% of the picture.
+
+Large decodes (64 MB or more of pixels) share a 2 GB budget, so memory no
+longer grows with the number of CPU cores when a folder holds big scans.
+
 ### Matching (100,000-photo pool, 22,500 tiles)
 
 | Method | Settings | Wall time | Peak RSS | Distinct photos | Adjacent repeats | Mean ΔE |

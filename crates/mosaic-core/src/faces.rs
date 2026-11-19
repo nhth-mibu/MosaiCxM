@@ -13,7 +13,7 @@ use tract_onnx::prelude::*;
 /// Bump when detection changes; photos without faces of this version are
 /// analysed again on the next index update.
 pub const FACES_VERSION: u32 = 1;
-/// Detector input (square, letterboxed). Faces smaller than about 10 px at
+/// Detector input, long side (the short side is fitted, see [`input_size`]). Faces smaller than about 10 px at
 /// this size (3% of the long side) are not found.
 pub const INPUT: usize = 320;
 /// Short side (px) to decode at so that the long side is at least [`INPUT`]
@@ -35,21 +35,36 @@ pub struct Face {
 
 type Model = std::sync::Arc<TypedRunnableModel>;
 
-fn model() -> Result<&'static Model> {
-    static M: OnceLock<std::result::Result<Model, String>> = OnceLock::new();
-    M.get_or_init(|| {
-        tract_onnx::onnx()
-            // The file's stored shapes are for 640×640; the network itself is size-agnostic.
-            .with_ignore_output_shapes(true)
-            .with_ignore_value_info(true)
-            .model_for_read(&mut std::io::Cursor::new(MODEL_BYTES))
-            .and_then(|m| m.with_input_fact(0, f32::fact([1, 3, INPUT, INPUT]).into()))
-            .and_then(|m| m.into_optimized())
-            .and_then(|m| m.into_runnable())
-            .map_err(|e| format!("face detector: {e}"))
-    })
-    .as_ref()
-    .map_err(|e| anyhow!("{e}"))
+/// Detector input size `(width, height)` for an image: the long side is
+/// [`INPUT`] and the short side is rounded up to a multiple of 32 (the
+/// network's largest stride). A 3:2 photo then runs on 320×224 instead of a
+/// letterboxed 320×320, which saves about a third of the work.
+pub fn input_size(w: u32, h: u32) -> (usize, usize) {
+    let short = |a: u32, b: u32| (((a as f64 * INPUT as f64 / b.max(1) as f64).ceil() as usize).div_ceil(32) * 32).clamp(32, INPUT);
+    if w >= h { (INPUT, short(h, w)) } else { (short(w, h), INPUT) }
+}
+
+/// The detector, optimised for one input size. Each size is built once and
+/// kept; there are only a few (one per short side, multiple of 32).
+fn model(w: usize, h: usize) -> Result<Model> {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    static M: OnceLock<Mutex<HashMap<(usize, usize), std::result::Result<Model, String>>>> = OnceLock::new();
+    let mut map = M.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
+    map.entry((w, h))
+        .or_insert_with(|| {
+            tract_onnx::onnx()
+                // The file's stored shapes are for 640×640; the network itself is size-agnostic.
+                .with_ignore_output_shapes(true)
+                .with_ignore_value_info(true)
+                .model_for_read(&mut std::io::Cursor::new(MODEL_BYTES))
+                .and_then(|m| m.with_input_fact(0, f32::fact([1, 3, h, w]).into()))
+                .and_then(|m| m.into_optimized())
+                .and_then(|m| m.into_runnable())
+                .map_err(|e| format!("face detector: {e}"))
+        })
+        .clone()
+        .map_err(|e| anyhow!("{e}"))
 }
 
 /// Faces in an upright image, largest first (at most [`MAX_FACES`]).
@@ -60,24 +75,25 @@ pub fn detect(img: &RgbImage) -> Result<Vec<Face>> {
     }
     let s = INPUT as f32 / w.max(h) as f32;
     let (rw, rh) = (((w as f32 * s).round() as u32).clamp(1, INPUT as u32), ((h as f32 * s).round() as u32).clamp(1, INPUT as u32));
+    let (iw, ih) = input_size(rw, rh);
     let small = if (rw, rh) == (w, h) { img.clone() } else { crate::decode::resize_crop(img, [0.0, 0.0, 1.0, 1.0], rw, rh)? };
-    // Letterboxed BGR planes, 0–255, as YuNet expects.
-    let plane = INPUT * INPUT;
+    // BGR planes, 0–255, as YuNet expects; padded to the input size.
+    let plane = iw * ih;
     let mut x = vec![0f32; 3 * plane];
     for (px, py, p) in small.enumerate_pixels() {
-        let i = py as usize * INPUT + px as usize;
+        let i = py as usize * iw + px as usize;
         x[i] = p[2] as f32;
         x[plane + i] = p[1] as f32;
         x[2 * plane + i] = p[0] as f32;
     }
-    let input = Tensor::from_shape(&[1, 3, INPUT, INPUT], &x)?;
-    let out = model()?.run(tvec!(input.into()))?;
+    let input = Tensor::from_shape(&[1, 3, ih, iw], &x)?;
+    let out = model(iw, ih)?.run(tvec!(input.into()))?;
     let view = |i: usize| out.get(i).ok_or_else(|| anyhow!("face detector: missing output")).and_then(|t| Ok(t.to_plain_array_view::<f32>()?.iter().copied().collect::<Vec<f32>>()));
     let mut found = Vec::new();
     // Outputs: cls_8/16/32, obj_8/16/32, bbox_8/16/32, kps_8/16/32.
     for (k, stride) in [8usize, 16, 32].into_iter().enumerate() {
         let (cls, obj, bbox) = (view(k)?, view(3 + k)?, view(6 + k)?);
-        decode_level(&cls, &obj, &bbox, stride, &mut found);
+        decode_level(&cls, &obj, &bbox, stride, iw / stride, &mut found);
     }
     let mut faces = nms(found);
     // Back to normalised coordinates of the image, clipped to it.
@@ -95,8 +111,7 @@ pub fn detect(img: &RgbImage) -> Result<Vec<Face>> {
 }
 
 /// Candidate boxes (input pixels) of one stride level of the YuNet head.
-fn decode_level(cls: &[f32], obj: &[f32], bbox: &[f32], stride: usize, out: &mut Vec<Face>) {
-    let cols = INPUT / stride;
+fn decode_level(cls: &[f32], obj: &[f32], bbox: &[f32], stride: usize, cols: usize, out: &mut Vec<Face>) {
     for i in 0..cls.len().min(obj.len()).min(bbox.len() / 4) {
         let score = (cls[i].clamp(0.0, 1.0) * obj[i].clamp(0.0, 1.0)).sqrt();
         if score < SCORE_MIN {
@@ -279,6 +294,23 @@ mod tests {
         assert!(!cuts_face([0.0, 0.0, 1.0, 1.0], &f));
         assert!(!cuts_face([0.0, 0.0, 0.3, 1.0], &f));
         assert!(cuts_face([0.0, 0.0, 0.5, 1.0], &f));
+    }
+
+    #[test]
+    fn input_fits_the_photo_shape() {
+        assert_eq!(input_size(320, 320), (320, 320));
+        assert_eq!(input_size(320, 213), (320, 224));
+        assert_eq!(input_size(320, 180), (320, 192));
+        assert_eq!(input_size(240, 320), (256, 320));
+        assert_eq!(input_size(320, 5), (320, 32));
+    }
+
+    #[test]
+    fn detector_runs_on_wide_and_tall_photos() {
+        for (w, h) in [(400, 225), (225, 400), (1000, 100)] {
+            let img = RgbImage::from_pixel(w, h, image::Rgb([120, 140, 160]));
+            assert!(detect(&img).unwrap().is_empty());
+        }
     }
 
     #[test]
