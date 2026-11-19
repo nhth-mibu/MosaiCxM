@@ -56,6 +56,9 @@ enum Cmd {
     Pdf(PdfArgs),
     /// Write a CSV manifest of the photos used, with attribution metadata.
     Manifest { project: PathBuf, #[arg(short, long)] out: PathBuf },
+    /// Write a printable photo index (PDF): a map of the mosaic in areas,
+    /// then every photo with its date and where it is on the print.
+    Index { project: PathBuf, #[arg(short, long)] out: PathBuf },
     /// Suggest motifs that suit the selected libraries and settings.
     Recommend(RecommendArgs),
     /// Benchmarks with synthetic data.
@@ -503,6 +506,14 @@ fn run(cli: Cli, cancel: Arc<AtomicBool>) -> Result<()> {
             let p = Project::load(&project)?;
             let n = write_manifest(&cat, &p, &out)?;
             println!("Wrote {} ({n} photos). Usage rights are not inferred; check each photo's licence.", out.display());
+        }
+        Cmd::Index { project, out } => {
+            let cat = Catalog::open(&dd)?;
+            let p = Project::load(&project)?;
+            let overview = render_preview(&cat, &p, overview_tile_px(&p), &job)?;
+            let n = mosaic_core::photo_index::write_index_pdf(&cat, &p, Some(&overview), &out, &job)?;
+            eprintln!();
+            println!("Wrote {} ({n} photos).", out.display());
         }
         Cmd::Recommend(a) => recommend_cmd(&dd, a, &job)?,
         Cmd::Bench(b) => bench::run(&dd, b, &job)?,

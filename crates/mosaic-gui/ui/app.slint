@@ -60,6 +60,29 @@ export struct SuggestionRow {
     has-preview: bool,
 }
 
+// A tile drawn with an outline on the preview (fractions of the mosaic).
+export struct TileMark {
+    u: float,
+    v: float,
+    w: float,
+    h: float,
+    current: bool,
+}
+
+// The photo of the tile the user clicked in the preview.
+export struct TileInfo {
+    open: bool,
+    picture: image,
+    name: string,
+    date: string,
+    folder: string,
+    uses: string,
+    place: string,
+    distance: string,
+    has-file: bool,
+    more: bool,
+}
+
 global Theme {
     out property <bool> dark: Palette.color-scheme == ColorScheme.dark;
     out property <color> bg: dark ? #12161f : #f6f7fb;
@@ -508,7 +531,28 @@ component ZoomView inherits Rectangle {
     callback view-changed(float, float, float, length, length, length, length);
     // Mouse position as fractions of the mosaic.
     callback hover(float, float);
+    // Click on a tile (not a drag or a double-click), as fractions of the mosaic.
+    in property <TileInfo> info;
+    in property <[TileMark]> marks;
+    // Move the view to (goto-u, goto-v) each time goto-n changes.
+    in property <float> goto-u;
+    in property <float> goto-v;
+    in property <int> goto-n;
+    changed goto-n => {
+        root.cx = root.goto-u;
+        root.cy = root.goto-v;
+        root.settle();
+    }
+    callback tile-clicked(float, float);
+    callback open-photo();
+    callback show-folder();
+    callback next-use();
+    callback close-info();
     clip: true;
+    property <float> click-u;
+    property <float> click-v;
+    // The photo box goes on the side away from the clicked tile.
+    property <bool> card-right;
 
     property <float> aspect: root.base.height > 0 ? root.base.width / (root.base.height * 1.0) : 1;
     property <length> fit-w: min(root.width, root.height * root.aspect);
@@ -565,6 +609,44 @@ component ZoomView inherits Rectangle {
         image-fit: fill;
         opacity: root.dim;
     }
+    // Every tile that shows the chosen photo.
+    for m in root.marks: Rectangle {
+        // The clicked tile gets a bigger frame than the others.
+        property <length> pad: m.current ? 5px : 2px;
+        x: root.img-x + m.u * root.img-w - self.pad;
+        y: root.img-y + m.v * root.img-h - self.pad;
+        width: m.w * root.img-w + 2 * self.pad;
+        height: m.h * root.img-h + 2 * self.pad;
+        border-width: m.current ? 3px : 2px;
+        border-color: #ffffff;
+        Rectangle {
+            x: parent.border-width;
+            y: parent.border-width;
+            width: parent.width - 2 * parent.border-width;
+            height: parent.height - 2 * parent.border-width;
+            border-width: m.current ? 2px : 1px;
+            border-color: #000000c0;
+        }
+        Rectangle {
+            x: -2px;
+            y: -2px;
+            width: parent.width + 4px;
+            height: parent.height + 4px;
+            visible: m.current;
+            border-width: 2px;
+            border-color: #000000c0;
+        }
+    }
+    // A single click waits a moment, so a double-click only zooms.
+    click-timer := Timer {
+        interval: 280ms;
+        running: false;
+        triggered => {
+            self.running = false;
+            root.card-right = (root.img-x + root.click-u * root.img-w) < root.width / 2;
+            root.tile-clicked(root.click-u, root.click-v);
+        }
+    }
     ta := TouchArea {
         mouse-cursor: self.pressed && root.zoom > 1.001 ? MouseCursor.grabbing : root.zoom > 1.001 ? MouseCursor.grab : MouseCursor.crosshair;
         pointer-event(e) => {
@@ -587,7 +669,16 @@ component ZoomView inherits Rectangle {
             root.zoom-at(Math.pow(1.004, clamp(e.delta-y / 1px, -120, 120)), self.mouse-x, self.mouse-y);
             accept
         }
+        clicked => {
+            if abs(self.mouse-x - self.pressed-x) < 4px && abs(self.mouse-y - self.pressed-y) < 4px {
+                root.click-u = (self.mouse-x - root.img-x) / root.img-w;
+                root.click-v = (self.mouse-y - root.img-y) / root.img-h;
+                click-timer.running = false;
+                click-timer.running = true;
+            }
+        }
         double-clicked => {
+            click-timer.running = false;
             if root.zoom >= root.max-zoom * 0.99 {
                 root.fit();
             } else {
@@ -606,14 +697,58 @@ component ZoomView inherits Rectangle {
         background: #000000b0;
         name := Text { text: root.hover-label; color: #ffffff; font-size: 12px; }
     }
-    if root.zoom <= 1.001: Rectangle {
+    if root.zoom <= 1.001 && !root.info.open: Rectangle {
         x: 10px;
         y: root.height - self.height - 10px;
         width: help.preferred-width + 20px;
         height: 26px;
         border-radius: 7px;
         background: #00000080;
-        help := Text { text: "Scroll or double-click to look closer"; color: #ffffff; font-size: 12px; }
+        help := Text { text: "Scroll or double-click to look closer. Click a tile to see its photo."; color: #ffffff; font-size: 12px; }
+    }
+    // The photo of the clicked tile.
+    if root.info.open: Rectangle {
+        x: root.card-right ? root.width - self.width - 10px : 10px;
+        y: 10px;
+        width: 300px;
+        height: min(card.preferred-height, root.height - 60px);
+        border-radius: 10px;
+        background: Theme.surface;
+        border-width: 1px;
+        border-color: Theme.line;
+        drop-shadow-blur: 12px;
+        drop-shadow-color: #00000050;
+        clip: true;
+        // Clicks on the card must not reach the preview below.
+        TouchArea { }
+        card := VerticalLayout {
+            padding: 12px;
+            spacing: 4px;
+            HorizontalLayout {
+                spacing: 6px;
+                Text { text: root.info.name; font-size: 14px; font-weight: 700; color: Theme.fg; overflow: elide; horizontal-stretch: 1; vertical-alignment: center; }
+                OverlayButton { text: "×"; tip: "Close."; clicked => { root.close-info(); } }
+            }
+            Rectangle {
+                height: 170px;
+                border-radius: 6px;
+                background: Theme.bg;
+                Image { source: root.info.picture; width: parent.width; height: parent.height; image-fit: contain; }
+            }
+            Text { text: root.info.date; color: Theme.fg; font-size: 12px; }
+            Text { text: root.info.uses; color: Theme.muted; font-size: 12px; }
+            Text { text: root.info.place; color: Theme.fg; font-size: 12px; font-weight: 600; }
+            Text { text: root.info.distance; color: Theme.muted; font-size: 12px; }
+            Text { text: root.info.folder; color: Theme.muted; font-size: 11px; wrap: word-wrap; }
+            HorizontalLayout {
+                padding-top: 6px;
+                spacing: 6px;
+                alignment: start;
+                OverlayButton { text: "Open photo"; tip: "Open the original photo in your photo viewer."; enabled: root.info.has-file; clicked => { root.open-photo(); } }
+                OverlayButton { text: "Show folder"; tip: "Open the folder that has this photo."; enabled: root.info.has-file; clicked => { root.show-folder(); } }
+                if root.info.more: OverlayButton { text: "Next tile"; tip: "Go to the next tile that shows this photo."; clicked => { root.next-use(); } }
+            }
+        }
     }
     HorizontalLayout {
         x: root.width - self.preferred-width - 10px;
@@ -713,6 +848,12 @@ export component AppWindow inherits Window {
     in-out property <[float]> preview-detail-uv: [0, 0, 1, 1];
     in-out property <bool> preview-sharpening: false;
     in-out property <string> preview-hover-label;
+    // "Find my photo": the clicked tile's photo, and outlines on its tiles.
+    in-out property <TileInfo> tile-info;
+    in-out property <[TileMark]> tile-marks;
+    in-out property <float> preview-goto-u;
+    in-out property <float> preview-goto-v;
+    in-out property <int> preview-goto-n;
     in-out property <string> chip-photos;
     in-out property <string> chip-distance;
     in-out property <string> chip-repeats;
@@ -732,6 +873,7 @@ export component AppWindow inherits Window {
     in-out property <string> pdf-dpi: "300";
     in-out property <bool> marks: true;
     in-out property <bool> save-manifest: true;
+    in-out property <bool> save-photo-index: true;
     in-out property <bool> export-advanced: false;
     in-out property <string> export-summary;
     in-out property <string> export-report;
@@ -763,6 +905,7 @@ export component AppWindow inherits Window {
                 "Point at a control and wait a moment. A tooltip tells you what the control does. A small ? next to a name shows that it has a tooltip.",
                 "The app saves your work automatically. When you start the app again, it opens your last mosaic.",
                 "To look closer at the preview, scroll or double-click it. Drag it to move. Click the percentage to see the full mosaic again.",
+                "To see the photo of a tile, click the tile in the preview.",
                 "To keep a mosaic as a file, click Save as…. To use it again, click Open….",
                 "When a new version of the app is available, a blue bar shows above the preview. Click Download to get it. To check now, click Help, then Check for updates.",
                 "When you change a setting, the preview shows \"Settings changed since this preview\". Click Update preview to see the change.",
@@ -844,6 +987,7 @@ export component AppWindow inherits Window {
                 "300 DPI gives a sharp print. A big mosaic at 300 DPI makes a very big file.",
                 "The box above the export button shows the size of the file or the number of pages.",
                 "The app can also save a list of the photos that it used (CSV). A spreadsheet program can open this list.",
+                "The app can also save a photo index (PDF). Print it and put it next to the mosaic. Then people can find their photos.",
                 "Each export also saves the statistics as a .stats.json file next to the mosaic.",
             ],
         },
@@ -880,6 +1024,26 @@ export component AppWindow inherits Window {
                 "Each page shows the names of the pages next to it.",
                 "Grey pages on the map are empty. The app does not print them.",
                 "Glue overlap in Advanced sets how much the pages overlap.",
+            ],
+        },
+        {
+            title: "Find a photo",
+            tint: Theme.blue,
+            picture: @image-url("help/find.jpg"),
+            intro: "You can see the original photo of each tile. The photo index helps people find their photos on the printed mosaic.",
+            steps: [
+                "Click a tile in the preview. A box shows the photo, its date and its folder.",
+                "White frames show all the tiles with this photo. A bigger frame shows the tile that you clicked.",
+                "Click Next tile to go to the next tile with this photo.",
+                "Click Open photo to open the original photo. Click Show folder to open its folder.",
+                "To close the box, click ×.",
+            ],
+            notes: [
+                "Double-click still zooms in. A single click shows the photo.",
+                "In step 4, tick Also save a photo index to find each photo (PDF). The app saves the index next to the mosaic.",
+                "The first page of the index is a map. The map divides the mosaic into areas. The letter is the row of areas. The number is the column of areas. A1 is at the top left.",
+                "The other pages show each photo with its date and its area, row and column. They also show the distance from the left edge and from the top edge.",
+                "The date comes from the photo file. If a photo has no date, it is at the end of the list.",
             ],
         },
         {
@@ -942,6 +1106,11 @@ export component AppWindow inherits Window {
     callback open-project();
     callback preview-view-changed(float, float, float, length, length, length, length);
     callback preview-hover(float, float);
+    callback preview-tile-clicked(float, float);
+    callback tile-open-photo();
+    callback tile-show-folder();
+    callback tile-next-use();
+    callback tile-close();
 
     callback export-settings-changed();
     callback export();
@@ -1379,6 +1548,7 @@ export component AppWindow inherits Window {
                                     }
                                 }
                                 TipCheck { text: "Also save a list of the photos used (CSV)"; tip: "Save a list of all photos in the mosaic and where each one is. A spreadsheet program can open this file."; checked <=> root.save-manifest; }
+                                TipCheck { text: "Also save a photo index to find each photo (PDF)"; tip: "Save a list of all photos that you can print. The list shows each photo, its date and where it is on the mosaic. Then people can find their photos on the big print."; checked <=> root.save-photo-index; }
                                 HorizontalLayout {
                                     alignment: start;
                                     Tipped {
@@ -1533,6 +1703,16 @@ export component AppWindow inherits Window {
                             cy <=> root.preview-cy;
                             view-changed(z, x, y, iw, ih, vw, vh) => { root.preview-view-changed(z, x, y, iw, ih, vw, vh); }
                             hover(u, v) => { root.preview-hover(u, v); }
+                            info: root.tile-info;
+                            marks: root.tile-marks;
+                            goto-u: root.preview-goto-u;
+                            goto-v: root.preview-goto-v;
+                            goto-n: root.preview-goto-n;
+                            tile-clicked(u, v) => { root.preview-tile-clicked(u, v); }
+                            open-photo => { root.tile-open-photo(); }
+                            show-folder => { root.tile-show-folder(); }
+                            next-use => { root.tile-next-use(); }
+                            close-info => { root.tile-close(); }
                         }
                         if !root.has-preview: VerticalLayout {
                             alignment: center;

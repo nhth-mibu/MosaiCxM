@@ -18,6 +18,7 @@ use mosaic_core::job::{is_cancelled, Job};
 use mosaic_core::layout::{PrintSettings, PAPERS};
 use mosaic_core::matching::{GridSpec, MatchError, MatchSettings, Method};
 use mosaic_core::pdf::{export_pdf, plan_pdf};
+use mosaic_core::photo_index::{friendly_date, write_index_pdf, TilePlace};
 use mosaic_core::pool::Pool;
 use mosaic_core::project::{check_sources, libraries_refs, load_target, output_stats, shutter_label, write_manifest, write_output_stats, Counted, OutputStats, Range, Project};
 use mosaic_core::recommend::{recommend, MotifCandidate, MotifSource, RecommendOptions};
@@ -74,6 +75,17 @@ struct State {
     zoom_job: Option<Job>,
     zoom_gen: u64,
     zoom_plan: Option<zoom::Plan>,
+    /// The photo of the tile the user clicked, if its box is open.
+    picked: Option<Picked>,
+    picked_gen: u64,
+}
+
+/// "Find my photo": the clicked tile and every tile with the same photo.
+struct Picked {
+    source: usize,
+    tiles: Vec<usize>,
+    /// Which of `tiles` is the current one.
+    at: usize,
 }
 
 type Shared = Arc<Mutex<State>>;
@@ -566,6 +578,7 @@ fn reset_zoom(ui: &AppWindow, s: &mut State, p: &Arc<Project>) {
     ui.set_preview_has_detail(false);
     ui.set_preview_sharpening(false);
     ui.set_preview_hover_label("".into());
+    close_picked(ui, s);
     // Zoom in until about two tiles fill the view.
     ui.set_preview_max_zoom((p.grid.cols.max(p.grid.rows) as f32 / 2.0).max(4.0));
     let src = Arc::new(zoom::ZoomSource::new(p.clone(), s.data_dir.clone()));
@@ -624,6 +637,94 @@ fn sharpen_preview(ui: &AppWindow, st: &Shared, view: zoom::View) {
                     ui.set_status(format!("Could not load sharp photos: {e:#}").into());
                 }
             }
+        });
+    });
+}
+
+/// Hides the photo box and the tile frames.
+fn close_picked(ui: &AppWindow, s: &mut State) {
+    s.picked = None;
+    s.picked_gen += 1;
+    ui.set_tile_info(TileInfo::default());
+    ui.set_tile_marks(ModelRc::default());
+}
+
+/// File of the chosen photo, if it is on disk.
+fn picked_path(s: &State) -> Option<PathBuf> {
+    let (z, p) = (s.zoom.as_ref()?, s.picked.as_ref()?);
+    z.known_path(p.source).cloned()
+}
+
+/// Most tiles that get a frame (a photo can be on thousands of tiles).
+const MAX_MARKS: usize = 500;
+
+/// Shows where the current tile is, and frames every tile with the photo.
+/// With `go`, the preview moves to the current tile.
+fn show_picked_place(ui: &AppWindow, s: &State, go: bool) {
+    let (Some(z), Some(p)) = (s.zoom.as_ref(), s.picked.as_ref()) else { return };
+    let Some(&cur) = p.tiles.get(p.at) else { return };
+    let proj = &z.project;
+    let (cols, rows) = (proj.grid.cols.max(1) as usize, proj.grid.rows.max(1) as usize);
+    let (fw, fh) = (1.0 / cols as f32, 1.0 / rows as f32);
+    let mark = |t: usize| TileMark { u: (t % cols) as f32 * fw, v: (t / cols) as f32 * fh, w: fw, h: fh, current: t == cur };
+    let mut marks: Vec<TileMark> = p.tiles.iter().filter(|&&t| t != cur).take(MAX_MARKS).map(|&t| mark(t)).collect();
+    marks.push(mark(cur));
+    ui.set_tile_marks(ModelRc::new(VecModel::from(marks)));
+    let place = TilePlace::of(proj, cur);
+    let mut info = ui.get_tile_info();
+    info.uses = if p.tiles.len() == 1 { "Used on 1 tile".into() } else { format!("Used on {} tiles. This is tile {} of {}.", p.tiles.len(), p.at + 1, p.tiles.len()).into() };
+    info.place = place.short().into();
+    info.distance = place.distance().into();
+    info.more = p.tiles.len() > 1;
+    ui.set_tile_info(info);
+    if go {
+        ui.set_preview_goto_u((cur % cols) as f32 * fw + fw / 2.0);
+        ui.set_preview_goto_v((cur / cols) as f32 * fh + fh / 2.0);
+        ui.set_preview_goto_n(ui.get_preview_goto_n() + 1);
+    }
+}
+
+/// Opens the photo box for `source`. The picture and date load in the background.
+fn show_picked(ui: &AppWindow, shared: &Shared, s: &mut State, z: Arc<zoom::ZoomSource>, source: usize) {
+    s.picked_gen += 1;
+    let ticket = s.picked_gen;
+    let path = z.known_path(source).cloned();
+    ui.set_tile_info(TileInfo {
+        open: true,
+        name: path.as_deref().map(file_name).unwrap_or_else(|| format!("Photo {}", source + 1)).into(),
+        date: "".into(),
+        folder: path.as_deref().and_then(Path::parent).map(|d| d.display().to_string()).unwrap_or_default().into(),
+        has_file: path.is_some(),
+        ..Default::default()
+    });
+    show_picked_place(ui, s, false);
+    let weak = ui.as_weak();
+    let st = Arc::downgrade(shared);
+    std::thread::spawn(move || {
+        let loc = z.location(source);
+        let pic = z.picture(source, 400);
+        let _ = weak.upgrade_in_event_loop(move |ui| {
+            let Some(st) = st.upgrade() else { return };
+            let s = st.lock().unwrap();
+            if s.picked_gen != ticket {
+                return;
+            }
+            let mut info = ui.get_tile_info();
+            if let Some(img) = pic {
+                info.picture = Image::from_rgb8(to_image(&img));
+            }
+            let taken = loc.as_ref().and_then(|l| l.exif.taken.as_deref()).filter(|t| !t.trim().is_empty());
+            info.date = taken.map(|t| format!("Taken {}", friendly_date(t))).unwrap_or_else(|| "No date in the photo file".into()).into();
+            if !info.has_file {
+                // Not found on disk: say where it was.
+                if let Some(l) = &loc {
+                    info.name = file_name(&l.path).into();
+                    info.folder = format!("Not found. It was in {}", l.path.parent().map(|d| d.display().to_string()).unwrap_or_default()).into();
+                } else {
+                    info.folder = "This photo is no longer in your photo folders.".into();
+                }
+            }
+            ui.set_tile_info(info);
         });
     });
 }
@@ -1271,6 +1372,66 @@ fn main() -> Result<()> {
         });
     }
 
+    // Find my photo: click a tile to see its photo.
+    {
+        let (w, s) = (ui.as_weak(), st.clone());
+        ui.on_preview_tile_clicked(move |u, v| {
+            let ui = w.unwrap();
+            let shared = s.clone();
+            let mut s = s.lock().unwrap();
+            let Some(z) = s.zoom.clone() else { return };
+            let Some(i) = zoom::tile_at(&z.project, u as f64, v as f64) else {
+                return close_picked(&ui, &mut s);
+            };
+            let source = z.project.tiles[i].photo as usize;
+            let tiles: Vec<usize> = z.project.tiles.iter().enumerate().filter(|(_, t)| !t.is_empty() && t.photo as usize == source).map(|(k, _)| k).collect();
+            let at = tiles.iter().position(|&k| k == i).unwrap_or(0);
+            let same = s.picked.as_ref().is_some_and(|p| p.source == source);
+            s.picked = Some(Picked { source, tiles, at });
+            if same {
+                return show_picked_place(&ui, &s, false);
+            }
+            show_picked(&ui, &shared, &mut s, z, source);
+        });
+    }
+    {
+        let (w, s) = (ui.as_weak(), st.clone());
+        ui.on_tile_next_use(move || {
+            let ui = w.unwrap();
+            let mut s = s.lock().unwrap();
+            if let Some(p) = s.picked.as_mut() {
+                p.at = (p.at + 1) % p.tiles.len().max(1);
+            }
+            show_picked_place(&ui, &s, true);
+        });
+    }
+    {
+        let (w, s) = (ui.as_weak(), st.clone());
+        ui.on_tile_close(move || close_picked(&w.unwrap(), &mut s.lock().unwrap()));
+    }
+    {
+        let (w, s) = (ui.as_weak(), st.clone());
+        ui.on_tile_open_photo(move || {
+            let ui = w.unwrap();
+            if let Some(path) = picked_path(&s.lock().unwrap()) {
+                if let Err(e) = opener::open(&path) {
+                    ui.set_status(format!("Cannot open {}: {e}", path.display()).into());
+                }
+            }
+        });
+    }
+    {
+        let (w, s) = (ui.as_weak(), st.clone());
+        ui.on_tile_show_folder(move || {
+            let ui = w.unwrap();
+            if let Some(path) = picked_path(&s.lock().unwrap()) {
+                if let Err(e) = opener::reveal(&path) {
+                    ui.set_status(format!("Cannot open the folder of {}: {e}", path.display()).into());
+                }
+            }
+        });
+    }
+
     // ---------------- 4 Export
     {
         let (w, s) = (ui.as_weak(), st.clone());
@@ -1285,6 +1446,7 @@ fn main() -> Result<()> {
             let ui = w.unwrap();
             let Some(p) = s.lock().unwrap().project.clone() else { return };
             let manifest = ui.get_save_manifest();
+            let photo_index = ui.get_save_photo_index();
             if ui.get_export_kind() == 0 {
                 let fmt = raster_format(&ui);
                 let plan = match num(ui.get_export_dpi(), "DPI").and_then(|dpi| plan_raster(&p, dpi, fmt)) {
@@ -1306,6 +1468,9 @@ fn main() -> Result<()> {
                     let mut msg = format!("Saved {} ({}) in {:.0} s.", rep.path, format_bytes(rep.bytes), rep.elapsed_ms as f64 / 1000.0);
                     if manifest {
                         msg += &save_manifest(&cat, &p, &out)?;
+                    }
+                    if photo_index {
+                        msg += &save_photo_index(&cat, &p, &out, job)?;
                     }
                     Ok(Box::new(move |ui: &AppWindow, s: &mut State| {
                         ui.set_export_report(format!("{msg} Statistics saved next to it as .stats.json.").into());
@@ -1330,6 +1495,9 @@ fn main() -> Result<()> {
                     let mut msg = format!("Saved {} ({}, {} pages) in {:.0} s.", rep.path, format_bytes(rep.bytes), plan.printed_pages(), rep.elapsed_ms as f64 / 1000.0);
                     if manifest {
                         msg += &save_manifest(&cat, &p, &out)?;
+                    }
+                    if photo_index {
+                        msg += &save_photo_index(&cat, &p, &out, job)?;
                     }
                     Ok(Box::new(move |ui: &AppWindow, s: &mut State| {
                         ui.set_export_report(format!("{msg} Statistics saved next to it as .stats.json.").into());
@@ -1488,6 +1656,15 @@ fn start_update_check(ui: &AppWindow, dir: &Path, manual: bool) {
             ui.set_update_version(version.into());
         });
     });
+}
+
+/// Writes `<name>-photo-index.pdf` next to an export.
+fn save_photo_index(cat: &Catalog, p: &Project, out: &Path, job: &Job) -> Result<String> {
+    let stem = out.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "mosaic".into());
+    let pdf = out.with_file_name(format!("{stem}-photo-index.pdf"));
+    let overview = render_preview(cat, p, (1600 / p.grid.cols.max(p.grid.rows)).clamp(2, 32), job)?;
+    let n = write_index_pdf(cat, p, Some(&overview), &pdf, job)?;
+    Ok(format!(" Photo index of {n} photos saved to {}.", file_name(&pdf)))
 }
 
 /// Writes `<name>-photos-used.csv` next to an export.
