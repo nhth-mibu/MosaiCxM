@@ -15,6 +15,7 @@ pub mod project;
 pub mod render;
 pub mod rng;
 pub mod shape;
+pub mod sharpness;
 pub mod units;
 
 pub use catalog::Catalog;

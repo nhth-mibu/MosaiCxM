@@ -23,6 +23,7 @@ use mosaic_core::project::{check_sources, libraries_refs, load_target, output_st
 use mosaic_core::recommend::{recommend, MotifCandidate, MotifSource, RecommendOptions};
 use mosaic_core::render::{render_preview, FileSource};
 use mosaic_core::shape::{Outline, Shape};
+use mosaic_core::sharpness::Sharpness;
 use mosaic_core::units::format_bytes;
 use slint::{ComponentHandle, Image, Model, ModelRc, Rgb8Pixel, SharedPixelBuffer, SharedString, VecModel};
 use std::collections::HashSet;
@@ -455,12 +456,28 @@ fn mark_stale(ui: &AppWindow) {
     ui.set_preview_stale(ui.get_has_preview());
 }
 
+/// Distances (m) the preview can show the mosaic from.
+const VIEW_DISTANCES: [f64; 3] = [1.0, 3.0, 5.0];
+
+/// Checks which tiles look soft at the chosen print size and DPI.
+/// Updates the "View from" overlay and the warning chip; returns the warning.
+fn update_sharpness(ui: &AppWindow, p: &Project) -> Option<String> {
+    let dpi = if ui.get_export_kind() == 0 { ui.get_export_dpi() } else { ui.get_pdf_dpi() };
+    let sh = Sharpness::of(p, num(dpi, "DPI").ok());
+    ui.set_preview_artwork_mm(p.grid.width_mm as f32);
+    ui.set_preview_soft_tiles(ModelRc::new(VecModel::from(VIEW_DISTANCES.iter().map(|&d| sh.soft_at(d) as i32).collect::<Vec<_>>())));
+    let n = sh.soft_at(VIEW_DISTANCES[0]);
+    ui.set_chip_soft(if n > 0 { format!("{} soft up close", thousands(n as u64)) } else { String::new() }.into());
+    sh.warning(VIEW_DISTANCES[0])
+}
+
 /// Short, automatic size estimate for the Export step.
 fn update_export_summary(ui: &AppWindow, st: &State) {
     let Some(p) = st.project.clone() else {
         ui.set_export_summary("".into());
         return;
     };
+    let warning = update_sharpness(ui, &p);
     let text = if ui.get_export_kind() == 0 {
         num(ui.get_export_dpi(), "DPI").and_then(|dpi| plan_raster(&p, dpi, raster_format(ui))).map(|pl| {
             format!(
@@ -486,7 +503,11 @@ fn update_export_summary(ui: &AppWindow, st: &State) {
             )
         })
     };
-    ui.set_export_summary(match text { Ok(t) => t, Err(e) => format!("{e:#}") }.into());
+    let mut text = match text { Ok(t) => t, Err(e) => format!("{e:#}") };
+    if let Some(w) = warning {
+        text += &format!("\n{w}");
+    }
+    ui.set_export_summary(text.into());
 }
 
 /// Shows a loaded or freshly made project: settings, picture and preview.
@@ -537,6 +558,9 @@ fn show_project(ui: &AppWindow, s: &mut State, p: Project, buf: SharedPixelBuffe
     if p.settings.color_correction > 0.0 || p.settings.motif_blend > 0.0 {
         rep += &format!("\nAdjusted: colour correction {:.0}%, picture blend {:.0}% (changes how your photos look).", p.settings.color_correction * 100.0, p.settings.motif_blend * 100.0);
     }
+    if let Some(w) = Sharpness::of(&p, None).warning(VIEW_DISTANCES[0]) {
+        rep += &format!("\n{w}");
+    }
     ui.set_match_report(rep.into());
     s.preview_w = buf.width();
     ui.set_preview_image(Image::from_rgb8(buf));
@@ -563,6 +587,7 @@ fn reset_zoom(ui: &AppWindow, s: &mut State, p: &Arc<Project>) {
     ui.set_preview_zoom(1.0);
     ui.set_preview_cx(0.5);
     ui.set_preview_cy(0.5);
+    ui.set_preview_distance(0.0);
     ui.set_preview_has_detail(false);
     ui.set_preview_sharpening(false);
     ui.set_preview_hover_label("".into());
