@@ -486,6 +486,35 @@ fn damaged_project_file_gives_an_error_not_a_crash() {
 }
 
 #[test]
+fn photo_index_lists_every_photo_and_tile() {
+    use mosaic_core::photo_index::{build_index, write_index_pdf, TilePlace};
+    let (e, a) = indexed_env(40);
+    let p = make_project(&e, &[a], MatchSettings::for_method(Method::Classic), 12, 9);
+    let idx = build_index(&e.cat, &p, &Job::default()).unwrap();
+    assert_eq!(idx.len(), p.sources.len());
+    let mut seen: Vec<usize> = idx.iter().flat_map(|x| x.tiles.iter().copied()).collect();
+    seen.sort_unstable();
+    assert_eq!(seen, (0..p.tiles.len()).collect::<Vec<_>>(), "each tile listed exactly once");
+    for x in &idx {
+        assert!(x.path().is_some_and(|f| f.exists()));
+        assert!(x.tiles.iter().all(|&t| p.tiles[t].photo as usize == x.source));
+    }
+    // Tile 13 is row 2, column 2 of a 12-column grid.
+    let pl = TilePlace::of(&p, 13);
+    assert_eq!((pl.row, pl.col), (2, 2));
+    assert!((pl.x_mm - 1.5 * 200.0 / 12.0).abs() < 1e-9);
+    let out = e.root.join("index.pdf");
+    let n = write_index_pdf(&e.cat, &p, None, &out, &Job::default()).unwrap();
+    assert_eq!(n, idx.len());
+    let bytes = std::fs::read(&out).unwrap();
+    assert!(bytes.starts_with(b"%PDF-1.4") && bytes.ends_with(b"%%EOF\n"));
+    let text = String::from_utf8_lossy(&bytes);
+    assert!(text.contains("(Find your photo)"));
+    assert!(text.contains(&format!("({})", idx[0].name())));
+    assert!(no_partials(&e.root));
+}
+
+#[test]
 fn bigger_tiles_look_soft_from_further_away() {
     use mosaic_core::sharpness::{tile_dpi, Sharpness};
     let (e, lib) = indexed_env(60);
