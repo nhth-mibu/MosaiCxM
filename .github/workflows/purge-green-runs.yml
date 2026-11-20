@@ -18,7 +18,7 @@ name: Purge green run logs
 
 on:
   workflow_run:
-    workflows: ["Release", "Clean up Actions storage"]
+    workflows: ["Release", "Clean up Actions storage", "Delete merged branches"]
     types: [completed]
   workflow_dispatch:
 
