@@ -1,0 +1,105 @@
+name: Clean up Actions storage
+
+# Deletes old workflow artifacts and build caches so the account stays
+# under its Actions storage limit. Release downloads are NOT touched:
+# they are GitHub Release assets, not workflow artifacts.
+#
+# Keeps:
+# - all artifacts of the newest successful run of each workflow
+# - all artifacts from runs on branches of open pull requests
+# - the newest cache for each cache key prefix on main
+#
+# Runs every Monday, by hand (Actions > Clean up Actions storage > Run
+# workflow), and when this file changes in a pull request.
+
+on:
+  schedule:
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+  pull_request:
+    paths: [".github/workflows/cleanup.yml"]
+
+permissions:
+  actions: write
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: cleanup-actions-storage
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v8
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const mb = (b) => (b / 1024 / 1024).toFixed(1) + " MB";
+            // Delete, but treat "already gone" (404) as done: the lists can
+            // hold items that expired or were removed a moment ago.
+            const del = async (fn, args) => {
+              try { await fn(args); return true; }
+              catch (e) { if (e.status === 404) return false; throw e; }
+            };
+
+            // Branches of open PRs: keep their artifacts.
+            const prs = await github.paginate(github.rest.pulls.list, { owner, repo, state: "open", per_page: 100 });
+            const prBranches = new Set(prs.map((p) => p.head.ref));
+
+            // Newest successful run per workflow: keep its artifacts.
+            const keepRuns = new Set();
+            const workflows = await github.paginate(github.rest.actions.listRepoWorkflows, { owner, repo, per_page: 100 });
+            for (const wf of workflows) {
+              const { data } = await github.rest.actions.listWorkflowRuns({
+                owner, repo, workflow_id: wf.id, status: "success", per_page: 1,
+              });
+              if (data.workflow_runs[0]) keepRuns.add(data.workflow_runs[0].id);
+            }
+
+            // Artifacts
+            const artifacts = await github.paginate(github.rest.actions.listArtifactsForRepo, { owner, repo, per_page: 100 });
+            let artFreed = 0, artDeleted = 0, artKept = 0;
+            for (const a of artifacts) {
+              if (a.expired) continue;
+              const run = a.workflow_run || {};
+              if (keepRuns.has(run.id) || prBranches.has(run.head_branch)) {
+                artKept++;
+                core.info(`keep artifact ${a.name} (run ${run.id}, ${run.head_branch}, ${mb(a.size_in_bytes)})`);
+                continue;
+              }
+              if (!(await del(github.rest.actions.deleteArtifact, { owner, repo, artifact_id: a.id }))) continue;
+              artDeleted++;
+              artFreed += a.size_in_bytes;
+              core.info(`deleted artifact ${a.name} (run ${run.id}, ${run.head_branch}, ${mb(a.size_in_bytes)})`);
+            }
+
+            // Caches: keep only the newest cache per key prefix on main.
+            // Caches made on tags or PR branches can only be reused by that
+            // same tag or branch, so they are dead weight once the run ends.
+            const caches = await github.paginate(github.rest.actions.getActionsCacheList, {
+              owner, repo, per_page: 100, sort: "last_accessed_at", direction: "desc",
+            });
+            const seen = new Set();
+            let cacheFreed = 0, cacheDeleted = 0, cacheKept = 0;
+            for (const c of caches) {
+              // rust-cache keys end in a hash; group by everything before it.
+              const prefix = c.key.replace(/-[0-9a-f]{8,}$/i, "");
+              if (c.ref === "refs/heads/main" && !seen.has(prefix)) {
+                seen.add(prefix);
+                cacheKept++;
+                core.info(`keep cache ${c.key} (${c.ref}, ${mb(c.size_in_bytes)})`);
+                continue;
+              }
+              if (!(await del(github.rest.actions.deleteActionsCacheById, { owner, repo, cache_id: c.id }))) continue;
+              cacheDeleted++;
+              cacheFreed += c.size_in_bytes;
+              core.info(`deleted cache ${c.key} (${c.ref}, ${mb(c.size_in_bytes)})`);
+            }
+
+            const summary =
+              `Artifacts: deleted ${artDeleted} (${mb(artFreed)}), kept ${artKept}.\n` +
+              `Caches: deleted ${cacheDeleted} (${mb(cacheFreed)}), kept ${cacheKept}.`;
+            core.info(summary);
+            await core.summary.addHeading("Actions storage cleanup").addCodeBlock(summary).write();
