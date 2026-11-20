@@ -5,7 +5,7 @@
 
 use anyhow::{anyhow, Result};
 use image::RgbImage;
-use mosaic_core::catalog::{unhex, Catalog};
+use mosaic_core::catalog::{unhex, Catalog, Location};
 use mosaic_core::decode;
 use mosaic_core::descriptor::THUMB_SHORT_SIDE;
 use mosaic_core::job::Job;
@@ -157,6 +157,28 @@ impl ZoomSource {
     /// File path of a source photo, if it was already looked up.
     pub fn known_path(&self, source: usize) -> Option<&PathBuf> {
         self.paths.get()?.get(source)?.as_ref()
+    }
+
+    /// First known location of a source photo in the catalogue (with its EXIF date).
+    pub fn location(&self, source: usize) -> Option<Location> {
+        let s = self.project.sources.get(source)?;
+        let h = unhex(&s.hash).ok()?;
+        let libs = self.project.library_ids();
+        self.with_catalog(|cat| cat.locations(&h, &libs)).ok()?.into_iter().next()
+    }
+
+    /// The photo, about `px` pixels on its short side: from the original file
+    /// when it is there, else the stored thumbnail.
+    pub fn picture(&self, source: usize, px: u32) -> Option<RgbImage> {
+        let img = self.paths().get(source).and_then(|p| p.as_ref()).and_then(|p| decode::decode_file(p, Some(px)).ok()).map(|d| d.image);
+        let img = img.or_else(|| self.thumbnail(source as u32).ok())?;
+        // Keep it small: the box shows it at most 300 px wide.
+        let s = (px as f64 * 1.5 / img.width().max(img.height()) as f64).min(1.0);
+        if s < 1.0 {
+            let (w, h) = (((img.width() as f64 * s).round() as u32).max(1), ((img.height() as f64 * s).round() as u32).max(1));
+            return Some(image::imageops::resize(&img, w, h, image::imageops::FilterType::Triangle));
+        }
+        Some(img)
     }
 
     fn with_catalog<T>(&self, f: impl FnOnce(&Catalog) -> Result<T>) -> Result<T> {

@@ -26,6 +26,7 @@ pub use project::Project;
 pub mod export;
 pub mod layout;
 pub mod pdf;
+pub mod photo_index;
 pub mod tiff;
 pub mod recommend;
 

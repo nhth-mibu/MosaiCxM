@@ -21,7 +21,7 @@ use std::io::{BufWriter, Seek, Write};
 use std::path::Path;
 use std::time::Instant;
 
-const PT_PER_MM: f64 = 72.0 / 25.4;
+pub(crate) const PT_PER_MM: f64 = 72.0 / 25.4;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct PdfPlan {
@@ -109,27 +109,27 @@ pub fn plan_pdf(project: &Project, print: &PrintSettings) -> Result<PdfPlan> {
     Ok(PdfPlan { layout, spec, print: print.clone(), max_page_px, blank, est_peak_memory, est_output_bytes, notes })
 }
 
-struct PdfOut<W: Write + Seek> {
-    w: W,
-    pos: u64,
-    offsets: Vec<u64>,
+pub(crate) struct PdfOut<W: Write + Seek> {
+    pub(crate) w: W,
+    pub(crate) pos: u64,
+    pub(crate) offsets: Vec<u64>,
 }
 
 impl<W: Write + Seek> PdfOut<W> {
-    fn alloc(&mut self) -> usize {
+    pub(crate) fn alloc(&mut self) -> usize {
         self.offsets.push(0);
         self.offsets.len() - 1
     }
-    fn raw(&mut self, b: &[u8]) -> Result<()> {
+    pub(crate) fn raw(&mut self, b: &[u8]) -> Result<()> {
         self.w.write_all(b)?;
         self.pos += b.len() as u64;
         Ok(())
     }
-    fn obj(&mut self, n: usize, body: &str) -> Result<()> {
+    pub(crate) fn obj(&mut self, n: usize, body: &str) -> Result<()> {
         self.offsets[n] = self.pos;
         self.raw(format!("{n} 0 obj\n{body}\nendobj\n").as_bytes())
     }
-    fn stream(&mut self, n: usize, dict: &str, data: &[u8]) -> Result<()> {
+    pub(crate) fn stream(&mut self, n: usize, dict: &str, data: &[u8]) -> Result<()> {
         self.offsets[n] = self.pos;
         self.raw(format!("{n} 0 obj\n<< {dict} /Length {} >>\nstream\n", data.len()).as_bytes())?;
         self.raw(data)?;
@@ -154,7 +154,7 @@ impl<W: Write> Write for Counting<'_, W> {
 }
 
 /// PDF text string (WinAnsi), escaping specials and mapping a few symbols.
-fn pdf_text(s: &str) -> String {
+pub(crate) fn pdf_text(s: &str) -> String {
     let mut o = String::from("(");
     for c in s.chars() {
         match c {
@@ -165,6 +165,8 @@ fn pdf_text(s: &str) -> String {
             '×' => o.push_str("\\327"),
             '–' | '—' => o.push('-'),
             c if c.is_ascii() && !c.is_control() => o.push(c),
+            // WinAnsi matches Latin-1 here.
+            c if ('\u{a0}'..='\u{ff}').contains(&c) => o.push_str(&format!("\\{:03o}", c as u32)),
             _ => o.push('?'),
         }
     }
@@ -172,32 +174,32 @@ fn pdf_text(s: &str) -> String {
     o
 }
 
-struct Content {
-    s: String,
+pub(crate) struct Content {
+    pub(crate) s: String,
     sheet_h: f64,
 }
 
 impl Content {
-    fn new(sheet_h: f64) -> Self {
+    pub(crate) fn new(sheet_h: f64) -> Self {
         Self { s: String::new(), sheet_h }
     }
-    fn x(&self, mm: f64) -> f64 {
+    pub(crate) fn x(&self, mm: f64) -> f64 {
         mm * PT_PER_MM
     }
-    fn y(&self, mm: f64) -> f64 {
+    pub(crate) fn y(&self, mm: f64) -> f64 {
         (self.sheet_h - mm) * PT_PER_MM
     }
     /// Line from top-left-based mm coordinates.
-    fn line(&mut self, x0: f64, y0: f64, x1: f64, y1: f64, width_pt: f64) {
+    pub(crate) fn line(&mut self, x0: f64, y0: f64, x1: f64, y1: f64, width_pt: f64) {
         self.s += &format!("{width_pt:.3} w {:.3} {:.3} m {:.3} {:.3} l S\n", self.x(x0), self.y(y0), self.x(x1), self.y(y1));
     }
-    fn rect(&mut self, x: f64, y: f64, w: f64, h: f64, width_pt: f64) {
+    pub(crate) fn rect(&mut self, x: f64, y: f64, w: f64, h: f64, width_pt: f64) {
         self.s += &format!("{width_pt:.3} w {:.3} {:.3} {:.3} {:.3} re S\n", self.x(x), self.y(y + h), w * PT_PER_MM, h * PT_PER_MM);
     }
-    fn text(&mut self, x: f64, y_baseline: f64, size: f64, bold: bool, t: &str) {
+    pub(crate) fn text(&mut self, x: f64, y_baseline: f64, size: f64, bold: bool, t: &str) {
         self.s += &format!("BT /{} {size:.2} Tf {:.3} {:.3} Td {} Tj ET\n", if bold { "F2" } else { "F1" }, self.x(x), self.y(y_baseline), pdf_text(t));
     }
-    fn image(&mut self, name: &str, x: f64, y: f64, w: f64, h: f64) {
+    pub(crate) fn image(&mut self, name: &str, x: f64, y: f64, w: f64, h: f64) {
         self.s += &format!("q {:.4} 0 0 {:.4} {:.4} {:.4} cm /{name} Do Q\n", w * PT_PER_MM, h * PT_PER_MM, self.x(x), self.y(y + h));
     }
     /// Ruler of `len` mm with 1 mm / 5 mm / 10 mm ticks.
