@@ -471,13 +471,14 @@ component OverlayButton inherits Rectangle {
     in property <string> text;
     in property <string> tip;
     in property <bool> enabled: true;
+    in property <bool> active;
     callback clicked();
     width: max(30px, t.preferred-width + 18px);
     height: 30px;
     border-radius: 7px;
-    background: ta.pressed ? Theme.line : Theme.surface;
+    background: ta.pressed ? Theme.line : root.active ? Theme.amber-soft : Theme.surface;
     border-width: 1px;
-    border-color: Theme.line;
+    border-color: root.active ? Theme.amber : Theme.line;
     ta := TouchArea {
         enabled: root.enabled;
         mouse-cursor: root.enabled ? pointer : default;
@@ -504,6 +505,12 @@ component ZoomView inherits Rectangle {
     in-out property <float> zoom: 1;
     in-out property <float> cx: 0.5;
     in-out property <float> cy: 0.5;
+    // Width of the printed mosaic in mm, for "View from".
+    in property <float> artwork-mm;
+    // Number of tiles that look soft from 1 m, 3 m and 5 m.
+    in property <[int]> soft-tiles: [0, 0, 0];
+    // Simulated viewing distance in metres; 0 when the user zooms freely.
+    in-out property <float> distance: 0;
     // zoom, centre, mosaic size on screen, view size.
     callback view-changed(float, float, float, length, length, length, length);
     // Mouse position as fractions of the mosaic.
@@ -533,19 +540,50 @@ component ZoomView inherits Rectangle {
     function zoom-at(factor: float, px: length, py: length) {
         let u = (px - root.img-x) / root.img-w;
         let v = (py - root.img-y) / root.img-h;
+        root.distance = 0;
         root.zoom = clamp(root.zoom * factor, 1, root.max-zoom);
         root.cx = u + (root.width / 2 - px) / root.img-w;
         root.cy = v + (root.height / 2 - py) / root.img-h;
         root.settle();
     }
     function fit() {
+        root.distance = 0;
         root.zoom = 1;
         root.cx = 0.5;
         root.cy = 0.5;
         root.settle();
     }
-    changed width => { root.settle(); }
-    changed height => { root.settle(); }
+    // Shows the mosaic as a person `d` metres away sees it. The view stands
+    // for 40° of sight, about what the eyes take in at one time:
+    // 2 · d · tan(20°) = 0.728 · d metres of wall.
+    function view-from(d: float) {
+        root.distance = d;
+        root.zoom = clamp(root.width / root.fit-w * root.artwork-mm / (728 * d), 0.02, root.max-zoom);
+        root.cx = 0.5;
+        root.cy = 0.5;
+        root.settle();
+    }
+    function resized() {
+        if root.distance > 0 {
+            root.view-from(root.distance);
+        } else {
+            root.settle();
+        }
+    }
+    changed width => { root.resized(); }
+    changed height => { root.resized(); }
+    // A wall behind the print when it is smaller than the view.
+    background: root.distance > 0 && root.zoom < 1 ? (Theme.dark ? #2b2a28 : #e4e0d8) : transparent;
+    if root.distance > 0 && root.zoom < 1: Rectangle {
+        x: root.img-x;
+        y: root.img-y;
+        width: root.img-w;
+        height: root.img-h;
+        background: #000000;
+        drop-shadow-blur: 8px;
+        drop-shadow-offset-y: 2px;
+        drop-shadow-color: #00000060;
+    }
 
     Image {
         source: root.base;
@@ -606,7 +644,7 @@ component ZoomView inherits Rectangle {
         background: #000000b0;
         name := Text { text: root.hover-label; color: #ffffff; font-size: 12px; }
     }
-    if root.zoom <= 1.001: Rectangle {
+    if root.zoom <= 1.001 && root.distance == 0: Rectangle {
         x: 10px;
         y: root.height - self.height - 10px;
         width: help.preferred-width + 20px;
@@ -614,6 +652,49 @@ component ZoomView inherits Rectangle {
         border-radius: 7px;
         background: #00000080;
         help := Text { text: "Scroll or double-click to look closer"; color: #ffffff; font-size: 12px; }
+    }
+    // View from 1 m, 3 m, 5 m.
+    if root.artwork-mm > 0: VerticalLayout {
+        x: 10px;
+        y: 10px;
+        width: root.width - 20px;
+        spacing: 6px;
+        alignment: start;
+        HorizontalLayout {
+            spacing: 6px;
+            alignment: start;
+            Rectangle {
+                width: vf.preferred-width + 20px;
+                height: 30px;
+                border-radius: 7px;
+                background: #000000b0;
+                vf := Text { text: "View from"; color: #ffffff; font-size: 12px; }
+            }
+            for d[i] in [1, 3, 5]: OverlayButton {
+                text: d + " m";
+                tip: "See the mosaic as a person " + d + " m away sees it. The preview then shows about what your eyes see at one time.";
+                active: root.distance == d;
+                clicked => { root.view-from(d); }
+            }
+        }
+        if root.distance > 0: HorizontalLayout {
+            alignment: start;
+            property <int> soft: root.distance == 1 ? root.soft-tiles[0] : root.distance == 3 ? root.soft-tiles[1] : root.soft-tiles[2];
+            Rectangle {
+                border-radius: 7px;
+                height: 30px;
+                width: info.preferred-width + 20px;
+                background: soft > 0 ? Theme.coral : #000000b0;
+                info := Text {
+                    text: soft > 0
+                        ? (soft == 1 ? "1 tile looks soft from " + root.distance + " m because its photo is too small." : soft + " tiles look soft from " + root.distance + " m because their photos are too small.")
+                        : "From " + root.distance + " m all tiles look sharp.";
+                    color: #ffffff;
+                    font-size: 12px;
+                    font-weight: soft > 0 ? 600 : 400;
+                }
+            }
+        }
     }
     HorizontalLayout {
         x: root.width - self.preferred-width - 10px;
@@ -627,7 +708,7 @@ component ZoomView inherits Rectangle {
             sharp := Text { text: "Loading sharp photos…"; color: #ffffff; font-size: 12px; }
         }
         OverlayButton { text: "−"; tip: "Zoom out."; enabled: root.zoom > 1.001; clicked => { root.zoom-at(1 / 1.6, root.width / 2, root.height / 2); } }
-        OverlayButton { text: round(root.zoom * 100) + "%"; tip: "Show the full mosaic again."; enabled: root.zoom > 1.001; clicked => { root.fit(); } }
+        OverlayButton { text: round(root.zoom * 100) + "%"; tip: "Show the full mosaic again."; enabled: root.zoom > 1.001 || root.distance > 0; clicked => { root.fit(); } }
         OverlayButton { text: "+"; tip: "Zoom in. The app then loads the sharp photos."; enabled: root.zoom < root.max-zoom; clicked => { root.zoom-at(1.6, root.width / 2, root.height / 2); } }
     }
 }
@@ -693,6 +774,9 @@ export component AppWindow inherits Window {
     in-out property <int> seed: 1;
     in-out property <float> color-correction: 0;
     in-out property <float> motif-blend: 0;
+    in-out property <string> hidden-message;
+    in-out property <float> message-strength: 0.5;
+    in-out property <int> message-tone: 0; // auto, light, dark
     in-out property <int> shape-index: 0; // 0 rectangle, 1-5 built-in, 6 from file
     in-out property <string> shape-file;
     in-out property <string> shape-file-name;
@@ -707,6 +791,9 @@ export component AppWindow inherits Window {
     in-out property <float> preview-zoom: 1;
     in-out property <float> preview-cx: 0.5;
     in-out property <float> preview-cy: 0.5;
+    in-out property <float> preview-distance: 0;
+    in-out property <float> preview-artwork-mm: 0;
+    in-out property <[int]> preview-soft-tiles: [0, 0, 0];
     in-out property <float> preview-max-zoom: 8;
     in-out property <image> preview-detail;
     in-out property <bool> preview-has-detail: false;
@@ -716,6 +803,7 @@ export component AppWindow inherits Window {
     in-out property <string> chip-photos;
     in-out property <string> chip-distance;
     in-out property <string> chip-repeats;
+    in-out property <string> chip-soft;
     in-out property <string> match-report;
     in-out property <string> project-name: "New mosaic";
 
@@ -763,6 +851,7 @@ export component AppWindow inherits Window {
                 "Point at a control and wait a moment. A tooltip tells you what the control does. A small ? next to a name shows that it has a tooltip.",
                 "The app saves your work automatically. When you start the app again, it opens your last mosaic.",
                 "To look closer at the preview, scroll or double-click it. Drag it to move. Click the percentage to see the full mosaic again.",
+                "To see the mosaic as people see it on the wall, click View from 1 m, 3 m or 5 m above the preview. If a red line shows that tiles look soft, make the tiles smaller.",
                 "To keep a mosaic as a file, click Save as…. To use it again, click Open….",
                 "When a new version of the app is available, a blue bar shows above the preview. Click Download to get it. To check now, click Help, then Check for updates.",
                 "When you change a setting, the preview shows \"Settings changed since this preview\". Click Update preview to see the change.",
@@ -822,8 +911,10 @@ export component AppWindow inherits Window {
             notes: [
                 "The line below the shape shows the number of tiles and the best distance to look at the mosaic from.",
                 "Small tiles show more detail, but you need more photos. If the app shows \"Not enough photos\", use bigger tiles or add more photos.",
+                "Big tiles need photos with many pixels. If a photo has too few pixels for its tile, the tile looks soft from near. The chip \"soft up close\" below the preview and the Export step tell you how many tiles look soft from 1 m.",
                 "If the picture and the mosaic have different shapes, the app cuts off a part of the picture. The same line tells you how much.",
                 "Sharp matches the colours best and is the fastest. Balanced also follows edges. Varied uses the most different photos.",
+                "To hide a word, a name or a date in the mosaic, type it in Hidden message. Type | to start a new line. Up close, people see only photos. From far away, they can read the text. If the letters are too small, the line below the settings tells you.",
                 "Advanced has more settings, for example Colour correction. Point at each setting to read what it does.",
             ],
         },
@@ -1237,6 +1328,22 @@ export component AppWindow inherits Window {
                                     tip: "The colour of the area outside the shape.";
                                     ComboBox { model: ["White", "Black", "Light grey"]; current-index <=> root.shape-background-index; selected => { root.changed(); } }
                                 }
+                                Field {
+                                    label: "Hidden message";
+                                    tip: "Write a word, a name or a date into the mosaic. The app puts lighter or darker photos where the letters are. Up close you see only photos. From far away you can read the text. Type | to start a new line. Leave empty for no message.";
+                                    LineEdit { placeholder-text: "e.g. ANNA & TOM | 2026"; text <=> root.hidden-message; edited => { root.changed(); } }
+                                }
+                                if root.hidden-message != "": Field {
+                                    label: "How easy to read";
+                                    tip: "Higher values make the text easier to read from far away. Lower values hide it better.";
+                                    Slider { min-width: 100px; horizontal-stretch: 1; minimum: 0.1; maximum: 1; value <=> root.message-strength; changed => { root.changed(); } }
+                                    Text { text: round(root.message-strength * 100) + "%"; min-width: 36px; color: Theme.fg; vertical-alignment: center; }
+                                }
+                                if root.hidden-message != "": Field {
+                                    label: "Letters";
+                                    tip: "Auto makes the letters light on a dark picture and dark on a light picture.";
+                                    ComboBox { model: ["Auto", "Light", "Dark"]; current-index <=> root.message-tone; selected => { root.changed(); } }
+                                }
                                 StepHint { text: root.grid-info; }
                                 Tipped {
                                     tip: "How the app selects a photo for each tile. Point at each style to read more.";
@@ -1531,6 +1638,9 @@ export component AppWindow inherits Window {
                             zoom <=> root.preview-zoom;
                             cx <=> root.preview-cx;
                             cy <=> root.preview-cy;
+                            distance <=> root.preview-distance;
+                            artwork-mm: root.preview-artwork-mm;
+                            soft-tiles: root.preview-soft-tiles;
                             view-changed(z, x, y, iw, ih, vw, vh) => { root.preview-view-changed(z, x, y, iw, ih, vw, vh); }
                             hover(u, v) => { root.preview-hover(u, v); }
                         }
@@ -1551,6 +1661,7 @@ export component AppWindow inherits Window {
                         Chip { text: root.chip-photos; dot: Theme.teal; }
                         Chip { text: root.chip-distance; dot: Theme.amber; }
                         Chip { text: root.chip-repeats; dot: Theme.coral; }
+                        if root.chip-soft != "": Chip { text: root.chip-soft; dot: Theme.coral; }
                         LinkButton {
                             text: "Details";
                             vertical-alignment: center;

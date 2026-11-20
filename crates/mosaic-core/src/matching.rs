@@ -89,6 +89,9 @@ pub struct MatchSettings {
     pub color_correction: f32,
     /// 0 = off. Opacity (≤ 0.5) of the motif blended over the mosaic at render time.
     pub motif_blend: f32,
+    /// Text written into the mosaic with tile brightness (see [`crate::message`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hidden_message: Option<crate::message::HiddenMessage>,
 }
 
 impl MatchSettings {
@@ -106,6 +109,7 @@ impl MatchSettings {
             candidates: 48,
             color_correction: 0.0,
             motif_blend: 0.0,
+            hidden_message: None,
         };
         if method == Method::Variety {
             s.repeat_penalty = 8.0;
@@ -131,6 +135,9 @@ impl MatchSettings {
         }
         if self.repeat_radius > 20 {
             bail!("repeat radius must be at most 20 tiles");
+        }
+        if let Some(m) = &self.hidden_message {
+            m.validate()?;
         }
         Ok(())
     }

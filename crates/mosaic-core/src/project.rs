@@ -107,6 +107,16 @@ impl Project {
         job: &Job,
     ) -> Result<Project, MatchError> {
         let active = outline.as_ref().map(|o| o.active_tiles(&grid)).transpose()?;
+        let with_message;
+        let target = match &settings.hidden_message {
+            Some(m) => {
+                let mut t = target.clone();
+                crate::message::apply(&mut t, &grid, m)?;
+                with_message = t;
+                &with_message
+            }
+            None => target,
+        };
         let (tiles, stats) = match_tiles_masked(pool, target, &grid, &settings, active.as_deref(), job)?;
         // Keep only the photos actually used, in first-use order.
         let mut remap: HashMap<u32, u32> = HashMap::new();
