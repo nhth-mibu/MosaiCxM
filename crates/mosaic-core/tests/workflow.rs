@@ -469,6 +469,23 @@ fn thumbs_source(e: &Env, p: &Project) -> ThumbSource {
 }
 
 #[test]
+fn damaged_project_file_gives_an_error_not_a_crash() {
+    let (e, lib) = indexed_env(20);
+    let p = make_project(&e, &[lib], MatchSettings::for_method(Method::Classic), 4, 3);
+    let f = e.root.join("damaged.json");
+    p.save(&f).unwrap();
+    let text = std::fs::read_to_string(&f).unwrap();
+    let mut v: serde_json::Value = serde_json::from_str(&text).unwrap();
+    v["tiles"][0]["c"] = serde_json::json!([0.5, 0.0, 0.9, 1.0]);
+    std::fs::write(&f, v.to_string()).unwrap();
+    assert!(Project::load(&f).unwrap_err().to_string().contains("invalid crop"));
+    let mut v: serde_json::Value = serde_json::from_str(&text).unwrap();
+    v["grid"]["width_mm"] = serde_json::json!(0.0);
+    std::fs::write(&f, v.to_string()).unwrap();
+    assert!(Project::load(&f).unwrap_err().to_string().contains("invalid grid"));
+}
+
+#[test]
 fn photo_index_lists_every_photo_and_tile() {
     use mosaic_core::photo_index::{build_index, write_index_pdf, TilePlace};
     let (e, a) = indexed_env(40);

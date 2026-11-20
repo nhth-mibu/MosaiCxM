@@ -166,11 +166,20 @@ impl Project {
         if p.format != PROJECT_FORMAT {
             bail!("unsupported project format {}", p.format);
         }
+        // A damaged or hand-edited file must give an error here, not a crash later.
+        GridSpec::new(p.grid.width_mm, p.grid.height_mm, p.grid.cols, p.grid.rows).context("project has an invalid grid")?;
         if p.tiles.len() != p.grid.tiles() {
             bail!("project is inconsistent: {} tiles for a {}×{} grid", p.tiles.len(), p.grid.cols, p.grid.rows);
         }
         if p.tiles.iter().any(|t| if t.is_empty() { p.outline.is_none() } else { t.photo as usize >= p.sources.len() }) {
             bail!("project is inconsistent: tile refers to unknown source");
+        }
+        let crop_ok = |c: &[f32; 4]| c.iter().all(|v| v.is_finite()) && c[0] >= 0.0 && c[1] >= 0.0 && c[2] > 0.0 && c[3] > 0.0 && c[0] + c[2] <= 1.001 && c[1] + c[3] <= 1.001;
+        if p.tiles.iter().any(|t| !t.is_empty() && (!crop_ok(&t.crop) || !t.adjust.iter().all(|v| v.is_finite()))) {
+            bail!("project is inconsistent: a tile has an invalid crop");
+        }
+        if p.sources.iter().any(|s| s.width == 0 || s.height == 0) {
+            bail!("project is inconsistent: a source photo has no size");
         }
         Ok(p)
     }

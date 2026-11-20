@@ -533,6 +533,11 @@ pub fn retrieve(cands: &[Candidate], r: &Retrieval, target: &Target, s: &MatchSe
 
 /// [`retrieve`] that leaves inactive tiles with an empty list.
 pub fn retrieve_active(cands: &[Candidate], r: &Retrieval, target: &Target, s: &MatchSettings, active: Option<&[bool]>, job: &Job) -> Result<Vec<Vec<(u32, f32)>>> {
+    // When a tile's choice cannot depend on earlier choices (no reuse limit,
+    // no penalties), only its best candidate is ever used. Keeping just that
+    // one saves about 0.4 GB per million tiles.
+    let fixed = s.max_reuse.is_none() && (s.repeat_penalty <= 0.0 || s.repeat_radius == 0) && (s.method != Method::Variety || s.usage_penalty <= 0.0);
+    let keep = if fixed { 1 } else { usize::MAX };
     let k = s.candidates.max(4);
     let n = target.tiles.len();
     let mut out = Vec::with_capacity(n);
@@ -547,6 +552,8 @@ pub fn retrieve_active(cands: &[Candidate], r: &Retrieval, target: &Target, s: &
                 }
                 let mut v: Vec<(u32, f32)> = r.query(cands, t, k).into_iter().map(|c| (c, score(s.method, t, &cands[c as usize]))).collect();
                 v.sort_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)));
+                v.truncate(keep);
+                v.shrink_to_fit();
                 v
             })
             .collect();

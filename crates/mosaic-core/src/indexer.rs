@@ -109,8 +109,13 @@ pub fn update_library(cat: &Catalog, lib: i64, opts: &IndexOptions, job: &Job) -
         }
         let tw = Instant::now();
         job.report("scanning folders", 0, 0);
-        let (seen, walk_ok) = walk_root(&root.path, &mut rep);
+        let (seen, walk_ok) = walk_root(&root.path, &mut rep, job);
         rep.walk_ms += tw.elapsed().as_millis();
+        if job.is_cancelled() {
+            // The scan of a big or slow (network) folder can take minutes.
+            rep.cancelled = true;
+            break;
+        }
         rep.files_seen += seen.len() as u64;
         let existing = cat.files_of_root(root.id)?;
         let mut work = Vec::new();
@@ -235,10 +240,13 @@ pub fn walk_images(root: &Path) -> impl Iterator<Item = walkdir::Result<walkdir:
     })
 }
 
-fn walk_root(root: &Path, rep: &mut IndexReport) -> (HashMap<String, (i64, i64)>, bool) {
+fn walk_root(root: &Path, rep: &mut IndexReport, job: &Job) -> (HashMap<String, (i64, i64)>, bool) {
     let mut seen = HashMap::new();
     let mut ok = true;
-    for entry in walk_images(root) {
+    for (n, entry) in walk_images(root).enumerate() {
+        if n % 1024 == 1023 && job.is_cancelled() {
+            return (seen, false);
+        }
         let entry = match entry {
             Ok(e) => e,
             Err(e) if e.loop_ancestor().is_some() => {
