@@ -19,6 +19,7 @@ use mosaic_core::layout::{PrintSettings, PAPERS};
 use mosaic_core::matching::{GridSpec, MatchError, MatchSettings, Method};
 use mosaic_core::pdf::{export_pdf, plan_pdf};
 use mosaic_core::pool::Pool;
+use mosaic_core::message::{letter_tiles, HiddenMessage, Tone, MIN_LETTER_TILES};
 use mosaic_core::project::{check_sources, libraries_refs, load_target, output_stats, shutter_label, write_manifest, write_output_stats, Counted, OutputStats, Range, Project};
 use mosaic_core::recommend::{recommend, MotifCandidate, MotifSource, RecommendOptions};
 use mosaic_core::render::{render_preview, FileSource};
@@ -253,6 +254,14 @@ fn read_settings(ui: &AppWindow) -> Result<(GridSpec, MatchSettings)> {
     s.seed = ui.get_seed().max(0) as u64;
     s.color_correction = ui.get_color_correction();
     s.motif_blend = ui.get_motif_blend();
+    let text = ui.get_hidden_message();
+    if !text.trim().is_empty() {
+        s.hidden_message = Some(HiddenMessage {
+            text: text.to_string(),
+            strength: ui.get_message_strength().clamp(0.05, 1.0),
+            tone: Tone::ALL[ui.get_message_tone().clamp(0, 2) as usize],
+        });
+    }
     s.validate()?;
     Ok((grid, s))
 }
@@ -337,6 +346,13 @@ fn update_grid_info(ui: &AppWindow, st: &State) {
                     if photos < need {
                         t += &format!(" Not enough photos: you need at least {} for this size, or use bigger tiles.", thousands(need));
                     }
+                }
+            }
+            if let Some(m) = &s.hidden_message {
+                match letter_tiles(m, &g) {
+                    Ok(n) if n < MIN_LETTER_TILES => t += &format!(" Hidden message: the letters are only {n:.1} tiles tall. Use fewer letters, more lines or smaller tiles."),
+                    Ok(n) => t += &format!(" Hidden message: letters {n:.0} tiles tall."),
+                    Err(e) => t += &format!(" Hidden message: {e:#}."),
                 }
             }
             if let Some(h) = crop_hint(ui.get_motif_aspect() as f64, g.width_mm / g.height_mm) {
@@ -532,6 +548,10 @@ fn show_project(ui: &AppWindow, s: &mut State, p: Project, buf: SharedPixelBuffe
         ui.set_seed(p.settings.seed as i32);
         ui.set_color_correction(p.settings.color_correction);
         ui.set_motif_blend(p.settings.motif_blend);
+        let hm = p.settings.hidden_message.as_ref();
+        ui.set_hidden_message(hm.map(|m| m.text.as_str()).unwrap_or("").into());
+        ui.set_message_strength(hm.map_or(HiddenMessage::DEFAULT_STRENGTH, |m| m.strength));
+        ui.set_message_tone(hm.and_then(|m| Tone::ALL.iter().position(|t| *t == m.tone)).unwrap_or(0) as i32);
         show_outline(ui, p.outline.as_ref());
         let used: HashSet<i64> = p.libraries.iter().map(|l| l.id).collect();
         s.excluded = s.libs.iter().map(|l| l.id).filter(|id| !used.contains(id)).collect();

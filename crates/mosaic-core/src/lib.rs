@@ -10,6 +10,7 @@ pub mod faces;
 pub mod indexer;
 pub mod job;
 pub mod matching;
+pub mod message;
 pub mod pool;
 pub mod project;
 pub mod render;

@@ -774,6 +774,9 @@ export component AppWindow inherits Window {
     in-out property <int> seed: 1;
     in-out property <float> color-correction: 0;
     in-out property <float> motif-blend: 0;
+    in-out property <string> hidden-message;
+    in-out property <float> message-strength: 0.5;
+    in-out property <int> message-tone: 0; // auto, light, dark
     in-out property <int> shape-index: 0; // 0 rectangle, 1-5 built-in, 6 from file
     in-out property <string> shape-file;
     in-out property <string> shape-file-name;
@@ -911,6 +914,7 @@ export component AppWindow inherits Window {
                 "Big tiles need photos with many pixels. If a photo has too few pixels for its tile, the tile looks soft from near. The chip \"soft up close\" below the preview and the Export step tell you how many tiles look soft from 1 m.",
                 "If the picture and the mosaic have different shapes, the app cuts off a part of the picture. The same line tells you how much.",
                 "Sharp matches the colours best and is the fastest. Balanced also follows edges. Varied uses the most different photos.",
+                "To hide a word, a name or a date in the mosaic, type it in Hidden message. Type | to start a new line. Up close, people see only photos. From far away, they can read the text. If the letters are too small, the line below the settings tells you.",
                 "Advanced has more settings, for example Colour correction. Point at each setting to read what it does.",
             ],
         },
@@ -1323,6 +1327,22 @@ export component AppWindow inherits Window {
                                     label: "Outside the shape";
                                     tip: "The colour of the area outside the shape.";
                                     ComboBox { model: ["White", "Black", "Light grey"]; current-index <=> root.shape-background-index; selected => { root.changed(); } }
+                                }
+                                Field {
+                                    label: "Hidden message";
+                                    tip: "Write a word, a name or a date into the mosaic. The app puts lighter or darker photos where the letters are. Up close you see only photos. From far away you can read the text. Type | to start a new line. Leave empty for no message.";
+                                    LineEdit { placeholder-text: "e.g. ANNA & TOM | 2026"; text <=> root.hidden-message; edited => { root.changed(); } }
+                                }
+                                if root.hidden-message != "": Field {
+                                    label: "How easy to read";
+                                    tip: "Higher values make the text easier to read from far away. Lower values hide it better.";
+                                    Slider { min-width: 100px; horizontal-stretch: 1; minimum: 0.1; maximum: 1; value <=> root.message-strength; changed => { root.changed(); } }
+                                    Text { text: round(root.message-strength * 100) + "%"; min-width: 36px; color: Theme.fg; vertical-alignment: center; }
+                                }
+                                if root.hidden-message != "": Field {
+                                    label: "Letters";
+                                    tip: "Auto makes the letters light on a dark picture and dark on a light picture.";
+                                    ComboBox { model: ["Auto", "Light", "Dark"]; current-index <=> root.message-tone; selected => { root.changed(); } }
                                 }
                                 StepHint { text: root.grid-info; }
                                 Tipped {
