@@ -10,11 +10,13 @@ pub mod faces;
 pub mod indexer;
 pub mod job;
 pub mod matching;
+pub mod message;
 pub mod pool;
 pub mod project;
 pub mod render;
 pub mod rng;
 pub mod shape;
+pub mod sharpness;
 pub mod units;
 
 pub use catalog::Catalog;

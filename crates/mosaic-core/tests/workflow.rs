@@ -496,3 +496,26 @@ fn photo_index_lists_every_photo_and_tile() {
     assert!(text.contains(&format!("({})", idx[0].name())));
     assert!(no_partials(&e.root));
 }
+
+#[test]
+fn bigger_tiles_look_soft_from_further_away() {
+    use mosaic_core::sharpness::{tile_dpi, Sharpness};
+    let (e, lib) = indexed_env(60);
+    let mut s = MatchSettings::for_method(Method::Classic);
+    s.max_reuse = None;
+    // 200 × 150 mm with 90 px photos: 25 mm tiles get about 90 DPI, 50 mm tiles about 46.
+    let small = make_project(&e, &[lib], s.clone(), 8, 6);
+    let big = make_project(&e, &[lib], s, 4, 3);
+    let dpi: Vec<f64> = tile_dpi(&small).into_iter().flatten().collect();
+    assert_eq!(dpi.len(), 48);
+    assert!(dpi.iter().all(|&d| (85.0..140.0).contains(&d)), "{dpi:?}");
+    let (a, b) = (Sharpness::of(&small, None), Sharpness::of(&big, Some(300.0)));
+    assert!(b.all_sharp_from_m() > a.all_sharp_from_m() * 1.8);
+    assert_eq!(a.soft_at(3.0), 0);
+    assert_eq!(b.soft_at(1.0), 12);
+    assert!(b.warning(1.0).unwrap().starts_with("12 tiles"));
+    // A low print DPI makes every tile soft, and the warning says so.
+    let low = Sharpness::of(&small, Some(20.0));
+    assert_eq!(low.soft_at(3.0), 48);
+    assert!(low.warning(1.0).unwrap().contains("Use a DPI of 87 or more"));
+}

@@ -20,10 +20,12 @@ use mosaic_core::matching::{GridSpec, MatchError, MatchSettings, Method};
 use mosaic_core::pdf::{export_pdf, plan_pdf};
 use mosaic_core::photo_index::{friendly_date, write_index_pdf, TilePlace};
 use mosaic_core::pool::Pool;
+use mosaic_core::message::{letter_tiles, HiddenMessage, Tone, MIN_LETTER_TILES};
 use mosaic_core::project::{check_sources, libraries_refs, load_target, output_stats, shutter_label, write_manifest, write_output_stats, Counted, OutputStats, Range, Project};
 use mosaic_core::recommend::{recommend, MotifCandidate, MotifSource, RecommendOptions};
 use mosaic_core::render::{render_preview, FileSource};
 use mosaic_core::shape::{Outline, Shape};
+use mosaic_core::sharpness::Sharpness;
 use mosaic_core::units::format_bytes;
 use slint::{ComponentHandle, Image, Model, ModelRc, Rgb8Pixel, SharedPixelBuffer, SharedString, VecModel};
 use std::collections::HashSet;
@@ -264,6 +266,14 @@ fn read_settings(ui: &AppWindow) -> Result<(GridSpec, MatchSettings)> {
     s.seed = ui.get_seed().max(0) as u64;
     s.color_correction = ui.get_color_correction();
     s.motif_blend = ui.get_motif_blend();
+    let text = ui.get_hidden_message();
+    if !text.trim().is_empty() {
+        s.hidden_message = Some(HiddenMessage {
+            text: text.to_string(),
+            strength: ui.get_message_strength().clamp(0.05, 1.0),
+            tone: Tone::ALL[ui.get_message_tone().clamp(0, 2) as usize],
+        });
+    }
     s.validate()?;
     Ok((grid, s))
 }
@@ -348,6 +358,13 @@ fn update_grid_info(ui: &AppWindow, st: &State) {
                     if photos < need {
                         t += &format!(" Not enough photos: you need at least {} for this size, or use bigger tiles.", thousands(need));
                     }
+                }
+            }
+            if let Some(m) = &s.hidden_message {
+                match letter_tiles(m, &g) {
+                    Ok(n) if n < MIN_LETTER_TILES => t += &format!(" Hidden message: the letters are only {n:.1} tiles tall. Use fewer letters, more lines or smaller tiles."),
+                    Ok(n) => t += &format!(" Hidden message: letters {n:.0} tiles tall."),
+                    Err(e) => t += &format!(" Hidden message: {e:#}."),
                 }
             }
             if let Some(h) = crop_hint(ui.get_motif_aspect() as f64, g.width_mm / g.height_mm) {
@@ -467,12 +484,28 @@ fn mark_stale(ui: &AppWindow) {
     ui.set_preview_stale(ui.get_has_preview());
 }
 
+/// Distances (m) the preview can show the mosaic from.
+const VIEW_DISTANCES: [f64; 3] = [1.0, 3.0, 5.0];
+
+/// Checks which tiles look soft at the chosen print size and DPI.
+/// Updates the "View from" overlay and the warning chip; returns the warning.
+fn update_sharpness(ui: &AppWindow, p: &Project) -> Option<String> {
+    let dpi = if ui.get_export_kind() == 0 { ui.get_export_dpi() } else { ui.get_pdf_dpi() };
+    let sh = Sharpness::of(p, num(dpi, "DPI").ok());
+    ui.set_preview_artwork_mm(p.grid.width_mm as f32);
+    ui.set_preview_soft_tiles(ModelRc::new(VecModel::from(VIEW_DISTANCES.iter().map(|&d| sh.soft_at(d) as i32).collect::<Vec<_>>())));
+    let n = sh.soft_at(VIEW_DISTANCES[0]);
+    ui.set_chip_soft(if n > 0 { format!("{} soft up close", thousands(n as u64)) } else { String::new() }.into());
+    sh.warning(VIEW_DISTANCES[0])
+}
+
 /// Short, automatic size estimate for the Export step.
 fn update_export_summary(ui: &AppWindow, st: &State) {
     let Some(p) = st.project.clone() else {
         ui.set_export_summary("".into());
         return;
     };
+    let warning = update_sharpness(ui, &p);
     let text = if ui.get_export_kind() == 0 {
         num(ui.get_export_dpi(), "DPI").and_then(|dpi| plan_raster(&p, dpi, raster_format(ui))).map(|pl| {
             format!(
@@ -498,7 +531,11 @@ fn update_export_summary(ui: &AppWindow, st: &State) {
             )
         })
     };
-    ui.set_export_summary(match text { Ok(t) => t, Err(e) => format!("{e:#}") }.into());
+    let mut text = match text { Ok(t) => t, Err(e) => format!("{e:#}") };
+    if let Some(w) = warning {
+        text += &format!("\n{w}");
+    }
+    ui.set_export_summary(text.into());
 }
 
 /// Shows a loaded or freshly made project: settings, picture and preview.
@@ -523,6 +560,10 @@ fn show_project(ui: &AppWindow, s: &mut State, p: Project, buf: SharedPixelBuffe
         ui.set_seed(p.settings.seed as i32);
         ui.set_color_correction(p.settings.color_correction);
         ui.set_motif_blend(p.settings.motif_blend);
+        let hm = p.settings.hidden_message.as_ref();
+        ui.set_hidden_message(hm.map(|m| m.text.as_str()).unwrap_or("").into());
+        ui.set_message_strength(hm.map_or(HiddenMessage::DEFAULT_STRENGTH, |m| m.strength));
+        ui.set_message_tone(hm.and_then(|m| Tone::ALL.iter().position(|t| *t == m.tone)).unwrap_or(0) as i32);
         show_outline(ui, p.outline.as_ref());
         let used: HashSet<i64> = p.libraries.iter().map(|l| l.id).collect();
         s.excluded = s.libs.iter().map(|l| l.id).filter(|id| !used.contains(id)).collect();
@@ -548,6 +589,9 @@ fn show_project(ui: &AppWindow, s: &mut State, p: Project, buf: SharedPixelBuffe
     );
     if p.settings.color_correction > 0.0 || p.settings.motif_blend > 0.0 {
         rep += &format!("\nAdjusted: colour correction {:.0}%, picture blend {:.0}% (changes how your photos look).", p.settings.color_correction * 100.0, p.settings.motif_blend * 100.0);
+    }
+    if let Some(w) = Sharpness::of(&p, None).warning(VIEW_DISTANCES[0]) {
+        rep += &format!("\n{w}");
     }
     ui.set_match_report(rep.into());
     s.preview_w = buf.width();
@@ -575,6 +619,7 @@ fn reset_zoom(ui: &AppWindow, s: &mut State, p: &Arc<Project>) {
     ui.set_preview_zoom(1.0);
     ui.set_preview_cx(0.5);
     ui.set_preview_cy(0.5);
+    ui.set_preview_distance(0.0);
     ui.set_preview_has_detail(false);
     ui.set_preview_sharpening(false);
     ui.set_preview_hover_label("".into());

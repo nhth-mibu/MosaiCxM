@@ -11,6 +11,7 @@ use mosaic_core::layout::{paper_by_name, PrintSettings, PAPERS};
 use mosaic_core::matching::{GridSpec, MatchError, MatchSettings, Method};
 use mosaic_core::pdf::{export_pdf, plan_pdf};
 use mosaic_core::pool::Pool;
+use mosaic_core::message::{HiddenMessage, Tone};
 use mosaic_core::project::{check_sources, libraries_refs, load_target, write_manifest, write_output_stats, OutputStats, Project};
 use mosaic_core::render::{render_preview, FileSource};
 use mosaic_core::shape::{Outline, Shape};
@@ -138,6 +139,15 @@ pub struct MatchArgs {
     pub keep_near_duplicates: bool,
     #[arg(long)]
     pub candidates: Option<usize>,
+    /// Hidden message written with tile brightness ("|" starts a new line).
+    #[arg(long)]
+    pub message: Option<String>,
+    /// How visible the hidden message is, 0–1 (default 0.5).
+    #[arg(long, requires = "message")]
+    pub message_strength: Option<f32>,
+    /// Hidden message letters: auto | light | dark.
+    #[arg(long, requires = "message")]
+    pub message_tone: Option<String>,
 }
 
 #[derive(Args)]
@@ -334,6 +344,16 @@ pub fn settings_from(m: &MatchArgs) -> Result<(GridSpec, MatchSettings)> {
     s.color_correction = m.color_correction;
     s.motif_blend = m.blend;
     s.merge_near_duplicates = !m.keep_near_duplicates;
+    if let Some(text) = &m.message {
+        let mut hm = HiddenMessage::new(text);
+        if let Some(v) = m.message_strength {
+            hm.strength = v;
+        }
+        if let Some(t) = &m.message_tone {
+            hm.tone = Tone::parse(t)?;
+        }
+        s.hidden_message = Some(hm);
+    }
     s.validate()?;
     Ok((grid, s))
 }
