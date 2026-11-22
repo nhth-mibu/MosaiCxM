@@ -220,6 +220,59 @@ fn source_filters_combine_and_survive_selection_and_project_reload() {
 }
 
 #[test]
+fn document_decisions_ignore_old_cache_and_separate_models_and_failures() {
+    use mosaic_core::filters::{DocumentClassifier, PhotoFilters};
+    use std::cell::Cell;
+    let (e, lib) = indexed_env(3);
+    let dir = e.root.join("a");
+    // Sparse pale marks on paper, saved sideways, at original-photo size.
+    let mut page = RgbImage::from_pixel(1200, 900, image::Rgb([225, 228, 233]));
+    for line in [200, 450, 700] {
+        for x in 160..1050 {
+            let y = line + ((x as f32 / 18.0).sin() * 22.0) as i32;
+            for d in 0..6 { page.put_pixel(x, (y + d) as u32, image::Rgb([155, 177, 199])); }
+        }
+    }
+    let path = dir.join("notes.png");
+    image::imageops::rotate90(&page).save(&path).unwrap();
+    update_library(&e.cat, lib, &opts(), &Job::default()).unwrap();
+    let hash = *blake3::hash(&std::fs::read(&path).unwrap()).as_bytes();
+    e.cat.conn.execute("INSERT INTO photo_classification(content_hash, version, document) VALUES(?1, 1, 0)", [&hash[..]]).unwrap();
+    let pool = Pool::load(&e.cat, &[lib], true).unwrap();
+    let filters = PhotoFilters { skip_documents: true, ..Default::default() };
+    let filtered = filters.apply(&pool, &e.cat, &[lib], true, &Job::default()).unwrap();
+    assert!(filtered.index_of(&hash).is_none(), "v1's cached miss must not survive the new classifier");
+    assert_eq!(filtered.photos.len(), 3, "ordinary generated photos must stay available");
+    let old = dir.join("notes-hidden.png");
+    std::fs::rename(&path, &old).unwrap();
+    assert_eq!(filters.apply(&pool, &e.cat, &[lib], true, &Job::default()).unwrap().photos.len(), 3, "cached judgements must not require rereading originals");
+    std::fs::rename(&old, &path).unwrap();
+
+    struct FakeModel { name: &'static str, calls: Cell<usize>, fail: bool }
+    impl DocumentClassifier for FakeModel {
+        fn cache_key(&self) -> String { self.name.into() }
+        fn is_document(&self, image: &RgbImage, _: &Job) -> anyhow::Result<bool> {
+            self.calls.set(self.calls.get() + 1);
+            assert!(image.width().max(image.height()) <= 1024);
+            if self.fail { anyhow::bail!("model request failed") }
+            Ok(false)
+        }
+    }
+    let model = FakeModel { name: "fake:model-1", calls: Cell::new(0), fail: false };
+    assert_eq!(filters.apply_with_classifier(&pool, &e.cat, &[lib], true, Some(&model), &Job::default()).unwrap().photos.len(), 4);
+    assert_eq!(model.calls.get(), 4, "a model gets its own judgements, separate from the offline cache");
+    filters.apply_with_classifier(&pool, &e.cat, &[lib], true, Some(&model), &Job::default()).unwrap();
+    assert_eq!(model.calls.get(), 4, "unchanged images must not be uploaded again");
+    let failed = FakeModel { name: "fake:model-2", calls: Cell::new(0), fail: true };
+    assert!(filters.apply_with_classifier(&pool, &e.cat, &[lib], true, Some(&failed), &Job::default()).is_err());
+    let cached: u32 = e.cat.conn.query_row("SELECT COUNT(*) FROM document_decision WHERE classifier = 'fake:model-2'", [], |r| r.get(0)).unwrap();
+    assert_eq!(cached, 0, "a failed model call must never become a cached photo judgement");
+    let next = FakeModel { name: "fake:model-2", calls: Cell::new(0), fail: false };
+    filters.apply_with_classifier(&pool, &e.cat, &[lib], true, Some(&next), &Job::default()).unwrap();
+    assert_eq!(next.calls.get(), 4, "changing models must re-evaluate images");
+}
+
+#[test]
 fn swapping_one_photo_preserves_other_tiles_and_saved_export() {
     let (e, lib) = indexed_env(24);
     let pool = Pool::load(&e.cat, &[lib], true).unwrap();

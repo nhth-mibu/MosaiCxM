@@ -12,7 +12,7 @@
 use anyhow::{anyhow, bail, Context, Result};
 use mosaic_core::catalog::{Catalog, LibraryInfo};
 use mosaic_core::export::{export_raster, plan_raster, RasterFormat};
-use mosaic_core::filters::{Colour, People, PhotoFilters};
+use mosaic_core::filters::{Colour, People, PhotoFilters, DocumentClassifier};
 use mosaic_core::decode::{decode_file, resize_crop};
 use mosaic_core::indexer::{update_library, walk_images, IndexOptions, IMAGE_EXTENSIONS};
 use mosaic_core::job::{is_cancelled, Job};
@@ -37,6 +37,7 @@ use std::time::Instant;
 
 mod update;
 mod zoom;
+mod vision;
 
 slint::include_modules!();
 
@@ -62,7 +63,9 @@ struct State {
     /// (library id, folder path) for each row of the folder list.
     folders: Vec<(i64, PathBuf)>,
     project: Option<Arc<Project>>,
-    pool: Option<(Vec<i64>, bool, PhotoFilters, Arc<Pool>)>,
+    pool: Option<CachedPool>,
+    /// Explicitly enabled for this session; never restored from a project.
+    classifier: Option<vision::Config>,
     job: Option<Job>,
     suggestion_paths: Vec<Option<PathBuf>>,
     /// Statistics of the current project, once counted.
@@ -81,6 +84,14 @@ struct State {
     /// The photo of the tile the user clicked, if its box is open.
     picked: Option<Picked>,
     picked_gen: u64,
+}
+
+struct CachedPool {
+    libraries: Vec<i64>,
+    merge: bool,
+    filters: PhotoFilters,
+    classifier: Option<String>,
+    pool: Arc<Pool>,
 }
 
 /// "Find my photo": the clicked tile and every tile with the same photo.
@@ -397,15 +408,30 @@ fn update_grid_info(ui: &AppWindow, st: &State) {
 
 fn load_pool(st: &Shared, cat: &Catalog, libs: &[i64], settings: &MatchSettings, job: &Job) -> Result<Arc<Pool>> {
     let merge = settings.merge_near_duplicates;
-    if let Some((l, m, f, p)) = &st.lock().unwrap().pool {
-        if l == libs && *m == merge && f == &settings.photo_filters {
-            return Ok(p.clone());
+    let classifier = st.lock().unwrap().classifier.clone();
+    let classifier_key = classifier.as_ref().map(|c| c.cache_key());
+    if let Some(c) = &st.lock().unwrap().pool {
+        if c.libraries == libs && c.merge == merge && c.filters == settings.photo_filters && c.classifier == classifier_key {
+            return Ok(c.pool.clone());
         }
     }
     let p = Pool::load(cat, libs, merge)?;
-    let p = Arc::new(if settings.photo_filters == PhotoFilters::default() { p } else { settings.photo_filters.apply(&p, cat, libs, merge, job)? });
-    st.lock().unwrap().pool = Some((libs.to_vec(), merge, settings.photo_filters.clone(), p.clone()));
+    let p = Arc::new(if settings.photo_filters == PhotoFilters::default() { p } else { settings.photo_filters.apply_with_classifier(&p, cat, libs, merge, classifier.as_ref().map(|c| c as &dyn DocumentClassifier), job)? });
+    st.lock().unwrap().pool = Some(CachedPool { libraries: libs.to_vec(), merge, filters: settings.photo_filters.clone(), classifier: classifier_key, pool: p.clone() });
     Ok(p)
+}
+
+fn read_classifier(ui: &AppWindow) -> Result<vision::Config> {
+    vision::Config::new(vision::Provider::from_index(ui.get_model_provider()), ui.get_model_endpoint().as_str(), ui.get_model_name().as_str(), ui.get_model_api_key().as_str())
+}
+
+fn disable_classifier(ui: &AppWindow, st: &Shared) {
+    let mut s = st.lock().unwrap();
+    let was_active = s.classifier.take().is_some();
+    s.pool = None;
+    ui.set_model_active(false);
+    ui.set_model_status("Offline checks only. Test or enable the model after editing its settings.".into());
+    if was_active { mark_stale(ui); }
 }
 
 fn selected_libs(st: &State) -> Result<Vec<i64>> {
@@ -624,7 +650,11 @@ fn show_project(ui: &AppWindow, s: &mut State, p: Project, buf: SharedPixelBuffe
     s.preview_w = buf.width();
     ui.set_preview_image(Image::from_rgb8(buf));
     ui.set_has_preview(true);
-    ui.set_preview_stale(false);
+    let old_document_filter = fill_settings && p.settings.photo_filters.skip_documents && p.settings.document_filter_version < mosaic_core::filters::DOCUMENT_VERSION;
+    ui.set_preview_stale(old_document_filter);
+    if old_document_filter {
+        ui.set_notice("Document detection has improved. Click Update preview to remove screenshots and handwritten pages missed by the previous version.".into());
+    }
     ui.set_main_view(0);
     ui.set_stats_summary(format!("{} photos", thousands(st.distinct_used as u64)).into());
     ui.set_has_stats(false);
@@ -1063,6 +1093,67 @@ fn scan(ui: &AppWindow, st: &Shared, id: i64) {
     });
 }
 
+/// Model connections require an explicit action and live only in this session.
+fn connect_model_controls(ui: &AppWindow, st: &Shared) {
+    {
+        let (w, s) = (ui.as_weak(), st.clone());
+        ui.on_model_provider_changed(move || {
+            let ui = w.unwrap();
+            disable_classifier(&ui, &s);
+            let (endpoint, model) = vision::Provider::from_index(ui.get_model_provider()).defaults();
+            ui.set_model_endpoint(endpoint.into());
+            ui.set_model_name(model.into());
+            ui.set_model_api_key("".into());
+        });
+    }
+    {
+        let (w, s) = (ui.as_weak(), st.clone());
+        ui.on_model_config_changed(move || disable_classifier(&w.unwrap(), &s));
+    }
+    {
+        let (w, s) = (ui.as_weak(), st.clone());
+        ui.on_disable_model(move || {
+            let ui = w.unwrap();
+            if ui.get_busy() { return; }
+            disable_classifier(&ui, &s);
+            if ui.get_has_preview() { ui.invoke_generate(); }
+        });
+    }
+    {
+        let (w, s) = (ui.as_weak(), st.clone());
+        ui.on_enable_model(move || {
+            let ui = w.unwrap();
+            if ui.get_busy() { return; }
+            let config = match read_classifier(&ui) { Ok(c) => c, Err(e) => return report_error(&ui, e) };
+            ui.set_model_status(format!("Enabled: {}. Used when Skip likely documents/screenshots is ticked.", config.label()).into());
+            {
+                let mut state = s.lock().unwrap();
+                state.classifier = Some(config);
+                state.pool = None;
+            }
+            ui.set_model_active(true);
+            ui.set_skip_documents(true);
+            mark_stale(&ui);
+            if ui.get_has_preview() { ui.invoke_generate(); }
+        });
+    }
+    {
+        let (w, s) = (ui.as_weak(), st.clone());
+        ui.on_test_model(move || {
+            let ui = w.unwrap();
+            if ui.get_busy() { return; }
+            let config = match read_classifier(&ui) { Ok(c) => c, Err(e) => return report_error(&ui, e) };
+            let Some(path) = rfd::FileDialog::new().set_title("Choose an image to send to the selected model").add_filter("Images", IMAGE_EXTENSIONS).pick_file() else { return };
+            run_job(&ui, &s, "Testing image classifier", move |job, _| {
+                let image = mosaic_core::filters::bounded_image(&decode_file(&path, Some(512))?.image);
+                let document = config.is_document(&image, job)?;
+                let text = format!("{}: {}", config.label(), if document { "document/screenshot — would be excluded" } else { "ordinary photo — would be kept" });
+                Ok(Box::new(move |ui: &AppWindow, _: &mut State| ui.set_model_status(text.into())))
+            });
+        });
+    }
+}
+
 fn main() -> Result<()> {
     let ui = AppWindow::new()?;
     ui.set_paper_formats(paper_formats());
@@ -1121,6 +1212,7 @@ fn main() -> Result<()> {
     }
 
     // ---------------- 1 Photos
+    connect_model_controls(&ui, &st);
     {
         let (w, s) = (ui.as_weak(), st.clone());
         ui.on_add_folder(move || {
@@ -1808,6 +1900,43 @@ fn save_manifest(cat: &Catalog, p: &Project, out: &Path) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::crop_hint;
+
+    #[test]
+    fn model_connections_require_enabling_and_edits_disconnect_them() {
+        use super::*;
+        i_slint_backend_testing::init_no_event_loop();
+        let ui = AppWindow::new().unwrap();
+        let state = Arc::new(Mutex::new(State::default()));
+        connect_model_controls(&ui, &state);
+        assert!(!ui.get_model_active());
+        assert!(state.lock().unwrap().classifier.is_none());
+        // No preview exists: enabling configures the next explicit preview;
+        // neither selecting a provider nor entering a key makes a request.
+        ui.invoke_enable_model();
+        assert!(ui.get_model_active());
+        assert!(ui.get_skip_documents());
+        assert!(state.lock().unwrap().classifier.is_some());
+        ui.set_model_endpoint("http://localhost:8000/v1".into());
+        ui.invoke_model_config_changed();
+        assert!(!ui.get_model_active());
+        assert!(state.lock().unwrap().classifier.is_none());
+
+        ui.set_model_api_key("fake-test-key".into());
+        ui.set_model_provider(4);
+        ui.invoke_model_provider_changed();
+        assert!(ui.get_model_api_key().is_empty(), "provider changes must clear the previous provider's key");
+        assert_eq!(ui.get_model_name(), "gpt-6-luna");
+        assert!(!ui.get_model_active());
+        ui.set_model_api_key("fake-test-key".into());
+        ui.invoke_enable_model();
+        assert!(ui.get_model_active());
+        let serialized = serde_json::to_string(&read_settings(&ui).unwrap().1).unwrap();
+        assert!(!serialized.contains("fake-test-key"));
+        assert!(!serialized.contains("api.openai.com"), "project settings must not restore a connection");
+        ui.invoke_disable_model();
+        assert!(!ui.get_model_active());
+        assert!(state.lock().unwrap().classifier.is_none());
+    }
 
     #[test]
     #[cfg(debug_assertions)]

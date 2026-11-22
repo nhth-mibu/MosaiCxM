@@ -86,6 +86,9 @@ pub struct MatchSettings {
     /// Source-photo restrictions, saved with the project by the desktop app.
     #[serde(default)]
     pub photo_filters: crate::filters::PhotoFilters,
+    /// Saved mosaics made with earlier document checks need an explicit refresh.
+    #[serde(default)]
+    pub document_filter_version: u32,
     /// Candidates retrieved per tile before reranking.
     pub candidates: usize,
     /// 0 = off. Fraction (≤ 0.5) of each tile's mean-colour error corrected at render time.
@@ -110,6 +113,7 @@ impl MatchSettings {
             merge_near_duplicates: true,
             seed: 1,
             photo_filters: crate::filters::PhotoFilters::default(),
+            document_filter_version: crate::filters::DOCUMENT_VERSION,
             candidates: 48,
             color_correction: 0.0,
             motif_blend: 0.0,

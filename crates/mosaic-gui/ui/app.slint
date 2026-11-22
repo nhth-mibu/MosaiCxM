@@ -886,6 +886,13 @@ export component AppWindow inherits Window {
     in-out property <int> people-filter: 0;
     in-out property <int> colour-filter: 0;
     in-out property <bool> skip-documents: false;
+    private property <bool> show-model-setup: false;
+    in-out property <int> model-provider: 0;
+    in-out property <string> model-endpoint: "http://localhost:11434/v1";
+    in-out property <string> model-name: "gemma3:4b";
+    in-out property <string> model-api-key;
+    in-out property <bool> model-active: false;
+    in-out property <string> model-status: "Offline checks only. No images are sent to a model.";
     // Folder check: shown after a folder is picked, before it is added.
     in-out property <string> check-folder;
     in-out property <string> check-summary;
@@ -1199,6 +1206,11 @@ export component AppWindow inherits Window {
     callback find-folder(int);
     callback toggle-collection(int, bool);
     callback show-skipped();
+    callback model-provider-changed();
+    callback model-config-changed();
+    callback enable-model();
+    callback disable-model();
+    callback test-model();
 
     callback browse-motif();
     callback swap-size();
@@ -1443,12 +1455,64 @@ export component AppWindow inherits Window {
                                     }
                                 }
                                 Tipped {
-                                    tip: "Skip likely document pages and screenshots using filenames and image patterns. This is approximate; ordinary photos with signs or writing can still be used.";
+                                    tip: "Skip likely document pages and screenshots. Offline checks inspect the original image for page patterns and faint handwriting. You can also enable a vision model below. Detection is approximate; ordinary photos with incidental signs or writing can still be used.";
                                     CheckBox {
                                         text: "Skip likely documents/screenshots";
                                         checked <=> root.skip-documents;
                                         toggled => { root.changed(); }
                                     }
+                                }
+                                LinkButton {
+                                    text: (root.show-model-setup ? "▾" : "▸") + " AI document filter (optional)";
+                                    clicked => { root.show-model-setup = !root.show-model-setup; }
+                                }
+                                if root.show-model-setup: VerticalLayout {
+                                    spacing: 8px;
+                                    Field {
+                                        label: "Provider";
+                                        tip: "Connect a vision model you already run, or choose a cloud service. Model checks are optional and start only after you click Enable model checks.";
+                                        ComboBox {
+                                            model: ["Ollama", "LM Studio", "vLLM (Linux / server)", "TypeSafe Jev (cloud)", "OpenAI Decisions (cloud)"];
+                                            current-index <=> root.model-provider;
+                                            enabled: !root.busy;
+                                            selected => { root.model-provider-changed(); }
+                                        }
+                                    }
+                                    if root.model-provider < 3: Field {
+                                        label: "API base URL";
+                                        tip: "Ollama usually uses http://localhost:11434/v1, LM Studio :1234/v1 and vLLM :8000/v1. Replace localhost with your server address when it runs on another computer.";
+                                        LineEdit { text <=> root.model-endpoint; enabled: !root.busy; edited => { root.model-config-changed(); } }
+                                    }
+                                    Field {
+                                        label: "Vision model";
+                                        tip: "Enter the exact name of a model that accepts images. In LM Studio or vLLM, use the loaded/served model's name.";
+                                        LineEdit { text <=> root.model-name; placeholder-text: "Your loaded vision model"; enabled: !root.busy; edited => { root.model-config-changed(); } }
+                                    }
+                                    Field {
+                                        label: root.model-provider >= 3 ? "API key (this session)" : "Server API key (optional)";
+                                        tip: "The key stays in memory for this session. It is never saved in a mosaic or settings file. OpenAI and Jev can also read OPENAI_API_KEY or TYPESAFE_API_KEY from the environment.";
+                                        LineEdit { text <=> root.model-api-key; input-type: password; enabled: !root.busy; edited => { root.model-config-changed(); } }
+                                    }
+                                    Text {
+                                        text: root.model-provider >= 3
+                                            ? "Enabling or testing sends resized photo previews to " + (root.model-provider == 3 ? "TypeSafe" : "OpenAI") + ". API charges may apply." + (root.model-provider == 3 ? " TypeSafe image support is experimental." : "")
+                                            : "Enabling or testing sends resized photo previews to the server above. Use a vision model loaded on a server you trust.";
+                                        color: Theme.muted;
+                                        font-size: 11px;
+                                        wrap: word-wrap;
+                                    }
+                                    HorizontalLayout {
+                                        alignment: start;
+                                        spacing: 6px;
+                                        Button { text: "Test with image…"; enabled: !root.busy; clicked => { root.test-model(); } }
+                                        Button {
+                                            text: root.model-active ? "Use offline only" : "Enable model checks";
+                                            enabled: !root.busy;
+                                            clicked => { if root.model-active { root.disable-model(); } else { root.enable-model(); } }
+                                        }
+                                    }
+                                    Text { text: root.model-status; color: Theme.muted; font-size: 11px; wrap: word-wrap; }
+                                    Text { text: "Results are cached. The first pass through a large collection can take a while. Model connections are enabled for this session only."; color: Theme.muted; font-size: 11px; wrap: word-wrap; }
                                 }
                             }
                         }

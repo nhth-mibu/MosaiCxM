@@ -1,5 +1,6 @@
 //! Offline source-photo filters. Face boxes and colour grids come from the
-//! index; document detection uses cached thumbnails and screenshot filenames.
+//! index; document detection uses larger original images and screenshot names.
+//! Optional model judgements are cached separately from the offline rules.
 
 use crate::catalog::{Catalog, Hash};
 use crate::color::dequantize_lab;
@@ -10,6 +11,15 @@ use anyhow::{bail, Result};
 use image::RgbImage;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+
+/// Optional image judgement. Implementations must return an error on failed,
+/// refused or malformed responses; those must never be cached as "photo".
+pub trait DocumentClassifier {
+    fn cache_key(&self) -> String;
+    fn is_document(&self, image: &RgbImage, job: &Job) -> Result<bool>;
+}
+
+pub const DOCUMENT_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -39,30 +49,40 @@ pub struct PhotoFilters {
 
 impl PhotoFilters {
     pub fn apply(&self, pool: &Pool, cat: &Catalog, libs: &[i64], merge: bool, job: &Job) -> Result<Pool> {
+        self.apply_with_classifier(pool, cat, libs, merge, None, job)
+    }
+
+    pub fn apply_with_classifier(&self, pool: &Pool, cat: &Catalog, libs: &[i64], merge: bool, classifier: Option<&dyn DocumentClassifier>, job: &Job) -> Result<Pool> {
         let screenshots = if self.skip_documents { screenshot_hashes(cat, libs)? } else { HashSet::new() };
+        let cache_key = classifier.map(|c| c.cache_key()).unwrap_or_else(|| format!("offline:{DOCUMENT_VERSION}"));
         let mut photos = Vec::new();
         for (i, p) in pool.photos.iter().enumerate() {
-            if i % 128 == 0 {
+            if classifier.is_some() || i % 128 == 0 {
                 job.check()?;
-                job.report("filtering source photos", i as u64, pool.photos.len() as u64);
+                job.report(if classifier.is_some() { "checking photos with vision model" } else { "filtering source photos" }, i as u64, pool.photos.len() as u64);
             }
             if !self.allows(p) { continue; }
             if self.skip_documents {
                 if screenshots.contains(&p.hash) { continue; }
-                let cached = cat.conn.query_row("SELECT document FROM photo_classification WHERE content_hash = ?1 AND version = 1", [&p.hash[..]], |r| r.get::<_, bool>(0));
+                let cached = cat.conn.query_row("SELECT document FROM document_decision WHERE content_hash = ?1 AND classifier = ?2", rusqlite::params![&p.hash[..], cache_key], |r| r.get::<_, bool>(0));
                 let document = match cached {
                     Ok(v) => v,
                     Err(rusqlite::Error::QueryReturnedNoRows) => {
-                        let bytes = cat.thumb(&p.hash)?.ok_or_else(|| anyhow::anyhow!("a photo thumbnail is missing; scan your folders again"))?;
-                        let document = likely_document(&decode::decode_bytes(&bytes, None)?.image);
-                        cat.conn.execute("INSERT OR REPLACE INTO photo_classification(content_hash, version, document) VALUES(?1, 1, ?2)", rusqlite::params![&p.hash[..], document])?;
+                        let image = analysis_image(cat, p, libs)?;
+                        job.check()?;
+                        let document = match classifier {
+                            Some(c) => c.is_document(&image, job)?,
+                            None => likely_document(&image),
+                        };
+                        job.check()?;
+                        cat.conn.execute("INSERT OR REPLACE INTO document_decision(content_hash, classifier, document) VALUES(?1, ?2, ?3)", rusqlite::params![&p.hash[..], cache_key, document])?;
                         document
                     }
                     Err(e) => return Err(e.into()),
                 };
                 // A substantial face is evidence of a portrait, even against
                 // a plain white backdrop. Filename-marked screenshots still go.
-                if document && !p.faces.iter().any(|f| f.rect[2] * f.rect[3] >= 0.02) { continue; }
+                if document && (classifier.is_some() || !p.faces.iter().any(|f| f.rect[2] * f.rect[3] >= 0.02)) { continue; }
             }
             photos.push(p.clone());
         }
@@ -88,6 +108,27 @@ impl PhotoFilters {
         };
         people && colour
     }
+}
+
+/// Read the upright original, then bound its size. The 96px preview thumbnail
+/// loses handwriting and small browser text, so it cannot classify documents.
+pub fn analysis_image(cat: &Catalog, p: &PoolPhoto, libs: &[i64]) -> Result<RgbImage> {
+    for location in cat.locations(&p.hash, libs)? {
+        let Ok(meta) = std::fs::metadata(&location.path) else { continue };
+        if meta.len() > decode::MAX_FILE_BYTES { continue; }
+        let Ok(bytes) = std::fs::read(&location.path) else { continue };
+        if blake3::hash(&bytes).as_bytes() != &p.hash { continue; }
+        if let Ok(decoded) = decode::decode_bytes(&bytes, Some(512)) {
+            return Ok(bounded_image(&decoded.image));
+        }
+    }
+    bail!("cannot inspect an unchanged original photo for the document filter; reconnect or rescan its folder, or turn off Skip likely documents/screenshots")
+}
+
+pub fn bounded_image(image: &RgbImage) -> RgbImage {
+    let scale = (1024.0 / image.width().max(image.height()).max(1) as f64).min(1.0);
+    let (w, h) = (((image.width() as f64 * scale).round() as u32).max(1), ((image.height() as f64 * scale).round() as u32).max(1));
+    image::imageops::thumbnail(image, w, h)
 }
 
 fn is_monochrome(p: &PoolPhoto) -> bool {
@@ -118,32 +159,72 @@ fn screenshot_hashes(cat: &Catalog, libs: &[i64]) -> Result<HashSet<Hash>> {
 /// Heuristic for pages and flat UI captures, deliberately not an OCR filter:
 /// broad flat backgrounds plus many short, high-contrast text-like runs.
 fn likely_document(img: &RgbImage) -> bool {
-    let small = image::imageops::thumbnail(img, 192, 192);
+    let small = bounded_image(img);
     let (w, h) = small.dimensions();
     if w < 24 || h < 24 { return false; }
     let distance = |a: image::Rgb<u8>, b: image::Rgb<u8>| (0..3).map(|k| a[k].abs_diff(b[k]) as u32).sum::<u32>();
     let mut flat = 0u32;
     let mut text_rows = 0u32;
     let mut edges = 0u32;
+    let mut paper = 0u32;
     for y in 1..h {
         let mut transitions = 0;
         for x in 1..w {
             let p = *small.get_pixel(x, y);
             let left = *small.get_pixel(x - 1, y);
             let above = *small.get_pixel(x, y - 1);
+            let lo = *p.0.iter().min().unwrap();
+            let hi = *p.0.iter().max().unwrap();
+            if lo > 150 && hi - lo < 25 { paper += 1; }
             if distance(p, left) < 18 && distance(p, above) < 18 { flat += 1; }
             if distance(p, left) > 150 { transitions += 1; edges += 1; }
         }
         if transitions >= 8 && transitions < w / 2 { text_rows += 1; }
     }
     let n = ((w - 1) * (h - 1)) as f32;
-    flat as f32 / n > 0.62 && text_rows as f32 / h as f32 > 0.12 && edges as f32 / n > 0.015
+    if flat as f32 / n > 0.62 && text_rows as f32 / h as f32 > 0.12 && edges as f32 / n > 0.015 { return true; }
+    if paper as f32 / n <= 0.85 { return false; }
+    // Compare against the surrounding paper rather than an absolute dark-ink
+    // threshold. This catches pale handwriting, including sideways notes.
+    let background = image::imageops::blur(&small, 6.0);
+    let shade = |c: &image::Rgb<u8>| (c[0] as f32 + c[1] as f32 * 2.0 + c[2] as f32) / 4.0;
+    let dark_ink = small.pixels().zip(background.pixels()).filter(|(p, bg)| shade(bg) - shade(p) > 8.0).count() as f32;
+    let density = dark_ink / (w * h) as f32;
+    density > 0.002 && density < 0.12
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{catalog::PoolRow, descriptor, faces::Face};
+
+    /// Private examples stay outside the repository. Supply paths separated by
+    /// the platform path separator with MOSAIC_DOCUMENT_SAMPLES.
+    #[test]
+    #[ignore]
+    fn document_samples_are_excluded() {
+        let paths = std::env::var_os("MOSAIC_DOCUMENT_SAMPLES").expect("set MOSAIC_DOCUMENT_SAMPLES");
+        let tmp = tempfile::tempdir().unwrap();
+        let photos = tmp.path().join("photos");
+        std::fs::create_dir(&photos).unwrap();
+        let mut hashes = Vec::new();
+        for (i, path) in std::env::split_paths(&paths).enumerate() {
+            let bytes = std::fs::read(path).unwrap();
+            hashes.push(*blake3::hash(&bytes).as_bytes());
+            std::fs::write(photos.join(format!("sample-{i}.png")), bytes).unwrap();
+        }
+        RgbImage::from_fn(800, 600, |x, y| image::Rgb([(80 + x / 8) as u8, (60 + y / 8) as u8, 70])).save(photos.join("ordinary-photo.png")).unwrap();
+        let cat = Catalog::open(&tmp.path().join("data")).unwrap();
+        let lib = cat.create_library("Private regression samples").unwrap();
+        cat.add_root(lib, &photos).unwrap();
+        crate::indexer::update_library(&cat, lib, &crate::indexer::IndexOptions { threads: 2, ..Default::default() }, &Job::default()).unwrap();
+        let pool = Pool::load(&cat, &[lib], true).unwrap();
+        let filters = PhotoFilters { skip_documents: true, ..Default::default() };
+        let kept = filters.apply(&pool, &cat, &[lib], true, &Job::default()).unwrap();
+        let missed: Vec<_> = hashes.iter().enumerate().filter(|(_, h)| kept.index_of(h).is_some()).map(|(i, _)| i + 1).collect();
+        assert!(missed.is_empty(), "documents/screenshots still admitted: sample numbers {missed:?}");
+        assert_eq!(kept.photos.len(), 1, "the ordinary photo must remain available");
+    }
 
     #[test]
     fn people_and_colour_filters_combine() {
@@ -175,10 +256,25 @@ mod tests {
             }
         }
         assert!(likely_document(&page));
-        let thumb = image::imageops::thumbnail(&page, 96, 96);
         let mut jpeg = Vec::new();
-        jpeg_encoder::Encoder::new(&mut jpeg, 85).encode(thumb.as_raw(), 96, 96, jpeg_encoder::ColorType::Rgb).unwrap();
-        assert!(likely_document(&decode::decode_bytes(&jpeg, None).unwrap().image), "must also work on stored JPEG thumbnails");
+        jpeg_encoder::Encoder::new(&mut jpeg, 85).encode(page.as_raw(), 192, 192, jpeg_encoder::ColorType::Rgb).unwrap();
+        assert!(likely_document(&decode::decode_bytes(&jpeg, None).unwrap().image), "JPEG compression must not hide a page at analysis resolution");
         assert!(!likely_document(&RgbImage::from_fn(192, 192, |x, y| image::Rgb([x as u8, y as u8, 100]))));
+    }
+
+    #[test]
+    fn faint_sparse_notes_are_detected_in_both_orientations() {
+        let mut page = RgbImage::from_pixel(512, 512, image::Rgb([225, 228, 233]));
+        for line in [100, 230, 360] {
+            for x in 65..440 {
+                let y = line + ((x as f32 / 8.0).sin() * 10.0) as i32;
+                for d in 0..3 { page.put_pixel(x, (y + d) as u32, image::Rgb([155, 177, 199])); }
+            }
+        }
+        assert!(likely_document(&page));
+        assert!(likely_document(&image::imageops::rotate90(&page)));
+        assert!(!likely_document(&RgbImage::from_pixel(512, 512, image::Rgb([225, 228, 233]))));
+        let bounded = bounded_image(&RgbImage::new(2000, 1000));
+        assert_eq!(bounded.dimensions(), (1024, 512), "model previews must keep the photo's aspect ratio");
     }
 }

@@ -138,6 +138,7 @@ CREATE TABLE IF NOT EXISTS descriptor(
 CREATE TABLE IF NOT EXISTS thumb(content_hash BLOB PRIMARY KEY, version INTEGER NOT NULL, jpeg BLOB NOT NULL);
 CREATE TABLE IF NOT EXISTS faces(content_hash BLOB PRIMARY KEY, version INTEGER NOT NULL, boxes BLOB NOT NULL);
 CREATE TABLE IF NOT EXISTS photo_classification(content_hash BLOB PRIMARY KEY, version INTEGER NOT NULL, document INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS document_decision(content_hash BLOB NOT NULL, classifier TEXT NOT NULL, document INTEGER NOT NULL, PRIMARY KEY(content_hash, classifier));
 "#;
 
 impl Catalog {
@@ -405,6 +406,7 @@ impl Catalog {
         self.conn.execute("DELETE FROM thumb WHERE content_hash NOT IN (SELECT content_hash FROM descriptor)", [])?;
         self.conn.execute("DELETE FROM faces WHERE content_hash NOT IN (SELECT content_hash FROM descriptor)", [])?;
         self.conn.execute("DELETE FROM photo_classification WHERE content_hash NOT IN (SELECT content_hash FROM descriptor)", [])?;
+        self.conn.execute("DELETE FROM document_decision WHERE content_hash NOT IN (SELECT content_hash FROM descriptor)", [])?;
         Ok(n)
     }
 }

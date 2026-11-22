@@ -3226,6 +3226,7 @@ name = "mosaic-gui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64",
  "directories",
  "i-slint-backend-testing",
  "image",

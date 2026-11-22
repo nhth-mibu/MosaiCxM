@@ -2,7 +2,7 @@
 
 Turn your own photos into a big photo mosaic: one picture made of thousands of small photos. MosaiCxM makes wall-sized prints (up to 3 × 3 m) that you can print at a print shop or at home on normal paper and glue together.
 
-Everything happens on your computer. Your photos are never uploaded and never changed.
+Mosaic creation works offline on your computer. Your original photos are never changed. Optional AI filtering can use a model on your own computer/server, or send resized previews to a cloud service you explicitly enable.
 
 ![MosaiCxM: coloured steps on the left, the mosaic preview on the right](docs/images/app.jpg)
 
@@ -56,7 +56,18 @@ You don't need to do anything else. Each time you open the app, it checks your f
 - **Moved a folder or unplugged a drive?** The folder is marked "not found". Click **Find it…** and show the app where the folder is now. Nothing has to be read again.
 - **Some files skipped?** Click **why?** to see which files could not be read (for example, broken or unsupported files).
 
-Use the filters in **Photos** to restrict the small photos used in your mosaic. **People / portraits** keeps photos with a clearly detected face; **No people** excludes photos with detected faces. **Photo colours** offers **All colours**, **Colour only** and **Black and white only** (using photos that are already black and white). Filters combine, so you can choose black-and-white portraits, for example. **Skip likely documents/screenshots** excludes screenshot filenames and images with page-like patterns. Detection is approximate and can miss images or exclude a photograph by mistake; it does not exclude every photo containing writing. Everything is analysed on your computer. If too few photos remain, relax the filters, allow more reuse, or add photos.
+Use the filters in **Photos** to restrict the small photos used in your mosaic. **People / portraits** keeps photos with a clearly detected face; **No people** excludes photos with detected faces. **Photo colours** offers **All colours**, **Colour only** and **Black and white only** (using photos that are already black and white). Filters combine, so you can choose black-and-white portraits, for example. **Skip likely documents/screenshots** checks screenshot filenames and larger images from the original files, including patterns of faint handwriting on paper. Detection is approximate and can miss images or exclude a photograph by mistake; it allows ordinary photos containing incidental writing. If too few photos remain, relax the filters, allow more reuse, or add photos.
+
+For optional model-assisted document detection, open **Photos → AI document filter (optional)**:
+
+1. Choose **Ollama**, **LM Studio**, **vLLM**, **TypeSafe Jev**, or **OpenAI Decisions**.
+2. For your own server, enter its API base URL and the name of a loaded vision model. Default URLs are `http://localhost:11434/v1` for Ollama, `http://localhost:1234/v1` for LM Studio, and `http://localhost:8000/v1` for vLLM. Replace `localhost` with your Linux/server address when needed. The model must support image input. For Ollama, install/load `gemma3:4b` or another vision model first; for LM Studio or vLLM, use the model name shown by your server.
+3. Enter a server/API key if required. Keys are kept in memory for the current session and are never saved in project files or settings. OpenAI and Jev also accept `OPENAI_API_KEY` and `TYPESAFE_API_KEY` from the environment.
+4. Click **Test with image…** to check one image, then **Enable model checks** to use the connection. This also enables **Skip likely documents/screenshots**. The existing preview is regenerated, or you can click **Make preview** for the first one.
+
+Enabling or testing sends resized image previews to the selected endpoint. OpenAI and TypeSafe are cloud services and may charge for requests. TypeSafe's image support is experimental. Model connections are enabled for this session only; opening a project never enables one. Changing a connection setting disables it until you enable it again. **Use offline only** disconnects the model. Judgements are cached by photo, provider, endpoint and model, so swaps and new selections reuse them. The first pass through a large photo collection can take a while. A failed, refused or malformed model response stops filtering with an error; it is never cached as an ordinary photo.
+
+Provider references: [Ollama vision compatibility](https://docs.ollama.com/api/openai-compatibility), [LM Studio](https://lmstudio.ai/docs/developer/openai-compat/chat-completions), [vLLM](https://docs.vllm.ai/en/latest/serving/openai_compatible_server/), [TypeSafe image inputs](https://docs.typesafe.ai/images), [OpenAI Decisions](https://developers.openai.com/api/docs/guides/decisions).
 
 ### 2 Picture (coral)
 
@@ -112,7 +123,7 @@ Click **Save as JSON…** to save the numbers as a file. Every export also saves
 
 ## Good to know
 
-- Your photos are only read. The app never changes, moves or deletes them, and nothing is sent over the internet.
+- Your photos are only read. The app never changes, moves or deletes them. Photo previews are sent to a model server only when you explicitly enable or test an AI filter connection.
 - If you remove a folder from the list, only the app's list changes. Your photos stay where they are.
 - If there are not enough photos for the size you chose, the app tells you what to do: use bigger tiles, allow each photo to be used more often, or add more photos.
 - The app follows your computer's light or dark mode.
