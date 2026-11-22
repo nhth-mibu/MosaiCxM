@@ -409,6 +409,12 @@ fn selected_libs(st: &State) -> Result<Vec<i64>> {
     Ok(v)
 }
 
+fn paper_formats() -> ModelRc<SharedString> {
+    let mut labels: Vec<SharedString> = PAPERS.iter().map(|p| format!("{} ({}×{} mm)", p.name, p.width_mm, p.height_mm).into()).collect();
+    labels.push("Custom".into());
+    ModelRc::new(VecModel::from(labels))
+}
+
 fn print_settings(ui: &AppWindow) -> Result<PrintSettings> {
     let i = ui.get_paper_index().max(0) as usize;
     let mut ps = if i < PAPERS.len() { PrintSettings::new(PAPERS[i]) } else { PrintSettings::custom(num(ui.get_custom_w(), "Paper width")?, num(ui.get_custom_h(), "Paper height")?) };
@@ -490,6 +496,7 @@ fn crop_hint(motif_aspect: f64, mosaic_aspect: f64) -> Option<String> {
 }
 
 fn mark_stale(ui: &AppWindow) {
+    ui.set_settings_revision(ui.get_settings_revision() + 1);
     ui.set_preview_stale(ui.get_has_preview());
 }
 
@@ -1012,6 +1019,7 @@ fn scan(ui: &AppWindow, st: &Shared, id: i64) {
 
 fn main() -> Result<()> {
     let ui = AppWindow::new()?;
+    ui.set_paper_formats(paper_formats());
     let st: Shared = Arc::new(Mutex::new(State { data_dir: data_dir(), ..Default::default() }));
     {
         let mut s = st.lock().unwrap();
@@ -1330,6 +1338,7 @@ fn main() -> Result<()> {
                 ui.set_open_step(2);
                 return report_error(&ui, anyhow!("choose a picture in step 2 first"));
             }
+            let revision = ui.get_settings_revision();
             let s2 = s.clone();
             run_job(&ui, &s, "Making preview", move |job, dd| {
                 let cat = Catalog::open(&dd)?;
@@ -1339,6 +1348,9 @@ fn main() -> Result<()> {
                 let tile_px = (2400 / grid.cols.max(grid.rows)).clamp(4, 48);
                 let buf = to_image(&render_preview(&cat, &p, tile_px, job)?);
                 Ok(Box::new(move |ui: &AppWindow, s: &mut State| {
+                    if ui.get_settings_revision() != revision {
+                        return;
+                    }
                     show_project(ui, s, p, buf, false);
                     match autosave(s) {
                         Ok(()) => ui.set_project_name("New mosaic (autosaved)".into()),
@@ -1498,6 +1510,9 @@ fn main() -> Result<()> {
         let (w, s) = (ui.as_weak(), st.clone());
         ui.on_export(move || {
             let ui = w.unwrap();
+            if ui.get_preview_stale() {
+                return report_error(&ui, anyhow!("wait for the preview to update before exporting; click Update preview to retry if needed"));
+            }
             let Some(p) = s.lock().unwrap().project.clone() else { return };
             let manifest = ui.get_save_manifest();
             let photo_index = ui.get_save_photo_index();
@@ -1546,7 +1561,7 @@ fn main() -> Result<()> {
                     let rep = export_pdf(&p, &src, Some(&overview), &plan, &out, job)?;
                     let details = serde_json::json!({ "paper": plan.print.paper_name, "landscape": plan.print.landscape, "pages": plan.printed_pages(), "overlap_mm": plan.print.overlap_mm, "dpi": plan.print.dpi, "bytes": rep.bytes });
                     let (_, stats) = write_output_stats(&cat, &p, &out, "tiled-pdf", details)?;
-                    let mut msg = format!("Saved {} ({}, {} pages) in {:.0} s.", rep.path, format_bytes(rep.bytes), plan.printed_pages(), rep.elapsed_ms as f64 / 1000.0);
+                    let mut msg = format!("Printable mosaic sheets saved to {} ({}, {} pages) in {:.0} s.", rep.path, format_bytes(rep.bytes), plan.printed_pages(), rep.elapsed_ms as f64 / 1000.0);
                     if manifest {
                         msg += &save_manifest(&cat, &p, &out)?;
                     }
@@ -1718,7 +1733,7 @@ fn save_photo_index(cat: &Catalog, p: &Project, out: &Path, job: &Job) -> Result
     let pdf = out.with_file_name(format!("{stem}-photo-index.pdf"));
     let overview = render_preview(cat, p, (1600 / p.grid.cols.max(p.grid.rows)).clamp(2, 32), job)?;
     let n = write_index_pdf(cat, p, Some(&overview), &pdf, job)?;
-    Ok(format!(" Photo index of {n} photos saved to {}.", file_name(&pdf)))
+    Ok(format!("\nSeparate photo index of {n} photos saved to {}.", file_name(&pdf)))
 }
 
 /// Writes `<name>-photos-used.csv` next to an export.
@@ -1732,6 +1747,83 @@ fn save_manifest(cat: &Catalog, p: &Project, out: &Path) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::crop_hint;
+
+    #[test]
+    #[cfg(debug_assertions)]
+    fn export_button_requires_a_current_preview() {
+        use slint::ComponentHandle;
+        use std::{cell::Cell, rc::Rc};
+
+        i_slint_backend_testing::init_no_event_loop();
+        let ui = super::AppWindow::new().unwrap();
+        ui.set_paper_formats(super::paper_formats());
+        ui.window().set_size(slint::LogicalSize::new(1280.0, 1600.0));
+        ui.set_open_step(4);
+        ui.set_export_kind(1);
+        ui.set_has_preview(true);
+        let exports = Rc::new(Cell::new(0));
+        let count = exports.clone();
+        ui.on_export(move || count.set(count.get() + 1));
+        ui.show().unwrap();
+        let button = i_slint_backend_testing::ElementHandle::find_by_accessible_label(&ui, "Export PDF…").next().unwrap();
+        button.mock_single_click(slint::platform::PointerEventButton::Left);
+        assert_eq!(exports.get(), 1);
+
+        ui.set_width_mm("1000".into());
+        ui.set_height_mm("600".into());
+        ui.set_preview_stale(true);
+        button.mock_single_click(slint::platform::PointerEventButton::Left);
+        assert_eq!(exports.get(), 1, "changed dimensions must not export the old mosaic");
+
+        ui.set_preview_stale(false);
+        ui.set_paper_index(super::PAPERS.len() as i32);
+        ui.set_custom_w("100".into());
+        ui.set_custom_h("150".into());
+        let print = super::print_settings(&ui).unwrap();
+        assert!(print.paper_name.starts_with("Custom"));
+        assert_eq!(print.sheet_mm(), (100.0, 150.0), "Custom must still select the entered size after adding presets");
+        let button = i_slint_backend_testing::ElementHandle::find_by_accessible_label(&ui, "Export PDF…").next().unwrap();
+        assert_eq!(button.accessible_enabled(), Some(true), "paper changes do not require another preview");
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    fn dimension_edits_refresh_preview_after_typing_stops() {
+        use slint::ComponentHandle;
+        use std::{cell::Cell, rc::Rc, time::Duration};
+
+        i_slint_backend_testing::init_no_event_loop();
+        let ui = super::AppWindow::new().unwrap();
+        ui.set_open_step(3);
+        ui.show().unwrap();
+        let updates = Rc::new(Cell::new(0));
+        let count = updates.clone();
+        ui.on_generate(move || count.set(count.get() + 1));
+        let width = i_slint_backend_testing::ElementHandle::find_by_accessible_label(&ui, "Mosaic width (mm)").next().unwrap();
+        let height = i_slint_backend_testing::ElementHandle::find_by_accessible_label(&ui, "Mosaic height (mm)").next().unwrap();
+        width.set_accessible_value("1500");
+        i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(1000));
+        assert_eq!(updates.get(), 0, "the first preview must still be started explicitly");
+
+        ui.set_has_preview(true);
+        width.set_accessible_value("100");
+        i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(400));
+        width.set_accessible_value("1000");
+        height.set_accessible_value("600");
+        assert!(ui.get_preview_stale());
+        i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(400));
+        assert_eq!(updates.get(), 0, "wait until typing stops");
+        i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(400));
+        assert_eq!(updates.get(), 1, "refresh once for the final dimensions");
+
+        ui.set_busy(true);
+        width.set_accessible_value("1100");
+        i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(1000));
+        assert_eq!(updates.get(), 1, "do not start a second job while busy");
+        ui.set_busy(false);
+        i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(800));
+        assert_eq!(updates.get(), 2, "apply edits made during the previous job");
+    }
 
     #[test]
     fn crop_hint_names_the_cut_side() {

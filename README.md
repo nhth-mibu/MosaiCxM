@@ -73,7 +73,7 @@ Not sure which picture to use? Click **Help me choose**. The app tries pictures 
 - **Shape:** keep the mosaic a rectangle, or give it an outline: ellipse, heart, hexagon, diamond, star, or **your own shape from a file**. In an SVG file the drawn parts are the shape; in a PNG with transparency the solid parts; in any other picture (JPG…) the dark parts. Tick **Swap inside and outside** to flip it. Tiles outside the shape stay empty (white, black or light grey), and print pages that would be empty are not printed. **Advanced → Edge tiles** sets how much of a tile must be inside the shape to get a photo.
 - **Hidden message:** type a word, name or date (for example `ANNA & TOM | 2026`; `|` starts a new line). Tiles under the letters get lighter or darker photos, so the text is easy to read from across the room but hidden up close. **How easy to read** sets the strength; **Letters** picks light, dark or automatic. The size line tells you how many tiles tall the letters are. CLI: `--message "…" --message-strength 0.5 --message-tone auto`.
 
-Click **Make preview**. This can take from a few seconds to a minute with very large photo collections. When you change something, the app shows **"Settings changed since this preview"**; click **Update preview** to see the new result.
+Click **Make preview**. This can take from a few seconds to a minute with very large photo collections. After the first preview, changes in **Size & style** update it automatically when you stop editing. Export becomes available when the update finishes. You can also click **Update preview** to retry.
 
 To look closer, scroll or double-click the preview, and drag to move around. When you stop, the app loads the photos you see from the original files, so each one is sharp, and shows the file name of the photo under the mouse. Use **−**, **+** and the zoom percentage (click it to see the whole mosaic again) in the corner.
 
@@ -85,6 +85,8 @@ Want more control? Open **Advanced** for the grid, how often each photo may be u
 
 - **Image file:** one big image file for a print shop. The app shows the size in pixels and the file size before you export.
 - **Print pages (PDF):** the mosaic cut into pages for your own printer. Choose the paper (A4, A3, Letter…) and the app shows how many pages you will get.
+
+For Canon SELPHY CP printers, choose **SELPHY Postcard (100×148 mm)**, **SELPHY L (89×119 mm)**, or **SELPHY Card (54×86 mm)**. These are the [finished photo sizes specified by Canon](https://cam.start.canon/en/P001/manual/html/UG-07_Reference_0070.html), after removing the perforated ends. Use **Landscape** to turn the paper. L and Card sizes need the matching cassette or adapter.
 
 Tick **Also save a list of the photos used** if you want a list of every photo in the mosaic.
 

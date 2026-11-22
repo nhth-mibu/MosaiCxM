@@ -3227,6 +3227,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "directories",
+ "i-slint-backend-testing",
  "image",
  "mosaic-core",
  "opener",

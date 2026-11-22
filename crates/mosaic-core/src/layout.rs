@@ -28,6 +28,10 @@ pub const PAPERS: &[Paper] = &[
     Paper { name: "Letter", width_mm: 215.9, height_mm: 279.4 },
     Paper { name: "Legal", width_mm: 215.9, height_mm: 355.6 },
     Paper { name: "Tabloid", width_mm: 279.4, height_mm: 431.8 },
+    // Canon SELPHY CP finished photo sizes, after removing perforated ends.
+    Paper { name: "SELPHY Postcard", width_mm: 100.0, height_mm: 148.0 },
+    Paper { name: "SELPHY L", width_mm: 89.0, height_mm: 119.0 },
+    Paper { name: "SELPHY Card", width_mm: 54.0, height_mm: 86.0 },
 ];
 
 pub fn paper_by_name(name: &str) -> Option<Paper> {

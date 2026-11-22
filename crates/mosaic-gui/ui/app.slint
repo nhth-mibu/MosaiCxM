@@ -925,6 +925,7 @@ export component AppWindow inherits Window {
     in-out property <image> preview-image;
     in-out property <bool> has-preview: false;
     in-out property <bool> preview-stale: false;
+    in-out property <int> settings-revision: 0;
     in-out property <float> preview-zoom: 1;
     in-out property <float> preview-cx: 0.5;
     in-out property <float> preview-cy: 0.5;
@@ -954,6 +955,7 @@ export component AppWindow inherits Window {
     in-out property <int> export-kind: 1; // 0 image file, 1 print pages (PDF)
     in-out property <int> raster-format-index: 0;
     in-out property <string> export-dpi: "300";
+    in property <[string]> paper-formats;
     in-out property <int> paper-index: 1;
     in-out property <string> custom-w: "600";
     in-out property <string> custom-h: "900";
@@ -1211,10 +1213,26 @@ export component AppWindow inherits Window {
     callback save-stats-json();
     callback cancel();
 
-    // Marks the preview as out of date and refreshes the grid summary.
+    // Refresh after editing stops; keep the first preview an explicit action.
     function changed() {
+        root.settings-revision += 1;
         root.preview-stale = root.has-preview;
         root.settings-changed();
+        preview-update.running = false;
+        preview-update.running = root.has-preview;
+    }
+
+    preview-update := Timer {
+        interval: 800ms;
+        running: false;
+        triggered => {
+            if !root.busy {
+                self.running = false;
+                if root.has-preview && root.preview-stale {
+                    root.generate();
+                }
+            }
+        }
     }
 
     VerticalLayout {
@@ -1462,8 +1480,8 @@ export component AppWindow inherits Window {
                                     VerticalLayout {
                                         spacing: 8px;
                                         horizontal-stretch: 1;
-                                        Field { label: "Width (mm)"; tip: "The width of the finished mosaic in millimetres. 1000 mm is 1 metre."; LineEdit { min-width: 80px; text <=> root.width-mm; edited => { root.changed(); } } }
-                                        Field { label: "Height (mm)"; tip: "The height of the finished mosaic in millimetres."; LineEdit { min-width: 80px; text <=> root.height-mm; edited => { root.changed(); } } }
+                                        Field { label: "Width (mm)"; tip: "The width of the finished mosaic in millimetres. 1000 mm is 1 metre."; LineEdit { accessible-label: "Mosaic width (mm)"; min-width: 80px; text <=> root.width-mm; edited => { root.changed(); } } }
+                                        Field { label: "Height (mm)"; tip: "The height of the finished mosaic in millimetres."; LineEdit { accessible-label: "Mosaic height (mm)"; min-width: 80px; text <=> root.height-mm; edited => { root.changed(); } } }
                                     }
                                     SwapButton {
                                         tooltip-text: "Swap the width and the height. This changes the mosaic from portrait to landscape, or from landscape to portrait.";
@@ -1625,8 +1643,8 @@ export component AppWindow inherits Window {
                                 }
                                 if root.export-kind == 1: VerticalLayout {
                                     spacing: 6px;
-                                    Field { label: "Paper"; tip: "The paper size in your printer."; ComboBox { model: ["A4", "A3", "A2", "A1", "A0", "Letter", "Legal", "Tabloid", "Custom"]; current-index <=> root.paper-index; selected => { root.export-settings-changed(); } } }
-                                    if root.paper-index == 8: Field {
+                                    Field { label: "Paper"; tip: "The finished paper size in your printer. SELPHY CP sizes exclude the perforated ends."; ComboBox { model: root.paper-formats; current-index <=> root.paper-index; selected => { root.export-settings-changed(); } } }
+                                    if root.paper-index == root.paper-formats.length - 1: Field {
                                         label: "Paper W × H (mm)";
                                         tip: "The width and height of your paper in millimetres.";
                                         LineEdit { text <=> root.custom-w; edited => { root.export-settings-changed(); } }
@@ -1647,26 +1665,30 @@ export component AppWindow inherits Window {
                                         }
                                     }
                                 }
-                                if root.export-summary != "": Rectangle {
+                                if root.export-summary != "" || root.preview-stale: Rectangle {
                                     border-radius: 6px;
                                     background: Theme.surface;
                                     VerticalLayout {
                                         padding: 8px;
-                                        Text { text: root.export-summary; font-size: 12px; color: Theme.fg; wrap: word-wrap; }
+                                        Text { text: root.preview-stale ? "Settings changed. Export is available after the preview updates." : root.export-summary; font-size: 12px; color: root.preview-stale ? Theme.coral : Theme.fg; wrap: word-wrap; }
                                     }
                                 }
                                 TipCheck { text: "Also save a list of the photos used (CSV)"; tip: "Save a list of all photos in the mosaic and where each one is. A spreadsheet program can open this file."; checked <=> root.save-manifest; }
-                                TipCheck { text: "Also save a photo index to find each photo (PDF)"; tip: "Save a list of all photos that you can print. The list shows each photo, its date and where it is on the mosaic. Then people can find their photos on the big print."; checked <=> root.save-photo-index; }
+                                TipCheck { text: "Also save a separate photo index (PDF)"; tip: "Save a separate A4 guide listing each photo, its date and where it is on the mosaic. The printable mosaic sheets are in the main export PDF."; checked <=> root.save-photo-index; }
                                 HorizontalLayout {
                                     alignment: start;
                                     Tipped {
                                         tip: !root.has-preview ? "Make a preview first. The export uses the same photos as the preview."
+                                            : root.preview-stale ? "Wait for the preview to update before exporting."
                                             : root.export-kind == 0 ? "Select where to save the image file."
                                             : "Select where to save the PDF. Then print it at 100% (Actual size) with Fit to page turned off. Measure the 50 mm square to check the size.";
                                         ColorButton {
                                             text: root.export-kind == 0 ? "Export image…" : "Export PDF…";
+                                            accessible-role: button;
+                                            accessible-label: self.text;
+                                            accessible-enabled: self.enabled;
                                             tint: Theme.violet;
-                                            enabled: !root.busy && root.has-preview;
+                                            enabled: !root.busy && root.has-preview && !root.preview-stale;
                                             clicked => { root.export(); }
                                         }
                                     }
