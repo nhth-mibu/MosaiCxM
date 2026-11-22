@@ -9,6 +9,7 @@
 //   5 Statistics    blue
 
 import { Button, LineEdit, SpinBox, Slider, CheckBox, ComboBox, ScrollView, Palette, Switch } from "std-widgets.slint";
+export { Palette } from "std-widgets.slint";
 
 export struct FolderRow {
     path: string,
@@ -178,6 +179,20 @@ component Field inherits HorizontalLayout {
         tip: root.tip;
         min-width: 120px;
         Label { text: root.label; font-size: 13px; }
+        if root.tip != "": HelpDot { }
+    }
+    @children
+}
+
+// Full-width controls for longer settings inside the narrow sidebar.
+component StackedField inherits VerticalLayout {
+    in property <string> label;
+    in property <string> tip;
+    spacing: 5px;
+    Tipped {
+        tip: root.tip;
+        min-height: 18px;
+        Label { text: root.label; font-size: 12px; font-weight: 600; }
         if root.tip != "": HelpDot { }
     }
     @children
@@ -1362,7 +1377,7 @@ export component AppWindow inherits Window {
                         alignment: start;
 
                         // ---------- 1 Photos (teal)
-                        StepCard {
+                        photos-card := StepCard {
                             open: root.open-step == 1;
                             tint: Theme.teal;
                             soft: Theme.teal-soft;
@@ -1462,57 +1477,80 @@ export component AppWindow inherits Window {
                                         toggled => { root.changed(); }
                                     }
                                 }
-                                LinkButton {
+                                model-setup-toggle := LinkButton {
                                     text: (root.show-model-setup ? "▾" : "▸") + " AI document filter (optional)";
                                     clicked => { root.show-model-setup = !root.show-model-setup; }
                                 }
-                                if root.show-model-setup: VerticalLayout {
-                                    spacing: 8px;
-                                    Field {
-                                        label: "Provider";
-                                        tip: "Connect a vision model you already run, or choose a cloud service. Model checks are optional and start only after you click Enable model checks.";
-                                        ComboBox {
-                                            model: ["Ollama", "LM Studio", "vLLM (Linux / server)", "TypeSafe Jev (cloud)", "OpenAI Decisions (cloud)"];
-                                            current-index <=> root.model-provider;
-                                            enabled: !root.busy;
-                                            selected => { root.model-provider-changed(); }
-                                        }
-                                    }
-                                    if root.model-provider < 3: Field {
-                                        label: "API base URL";
-                                        tip: "Ollama usually uses http://localhost:11434/v1, LM Studio :1234/v1 and vLLM :8000/v1. Replace localhost with your server address when it runs on another computer.";
-                                        LineEdit { text <=> root.model-endpoint; enabled: !root.busy; edited => { root.model-config-changed(); } }
-                                    }
-                                    Field {
-                                        label: "Vision model";
-                                        tip: "Enter the exact name of a model that accepts images. In LM Studio or vLLM, use the loaded/served model's name.";
-                                        LineEdit { text <=> root.model-name; placeholder-text: "Your loaded vision model"; enabled: !root.busy; edited => { root.model-config-changed(); } }
-                                    }
-                                    Field {
-                                        label: root.model-provider >= 3 ? "API key (this session)" : "Server API key (optional)";
-                                        tip: "The key stays in memory for this session. It is never saved in a mosaic or settings file. OpenAI and Jev can also read OPENAI_API_KEY or TYPESAFE_API_KEY from the environment.";
-                                        LineEdit { text <=> root.model-api-key; input-type: password; enabled: !root.busy; edited => { root.model-config-changed(); } }
-                                    }
-                                    Text {
-                                        text: root.model-provider >= 3
-                                            ? "Enabling or testing sends resized photo previews to " + (root.model-provider == 3 ? "TypeSafe" : "OpenAI") + ". API charges may apply." + (root.model-provider == 3 ? " TypeSafe image support is experimental." : "")
-                                            : "Enabling or testing sends resized photo previews to the server above. Use a vision model loaded on a server you trust.";
-                                        color: Theme.muted;
-                                        font-size: 11px;
-                                        wrap: word-wrap;
-                                    }
-                                    HorizontalLayout {
+                                if root.show-model-setup: model-settings := Rectangle {
+                                    background: Theme.surface;
+                                    border-color: Theme.line;
+                                    border-width: 1px;
+                                    border-radius: 8px;
+                                    min-height: model-form.preferred-height;
+                                    model-form := VerticalLayout {
+                                        padding: 12px;
+                                        spacing: 12px;
                                         alignment: start;
-                                        spacing: 6px;
-                                        Button { text: "Test with image…"; enabled: !root.busy; clicked => { root.test-model(); } }
-                                        Button {
-                                            text: root.model-active ? "Use offline only" : "Enable model checks";
-                                            enabled: !root.busy;
-                                            clicked => { if root.model-active { root.disable-model(); } else { root.enable-model(); } }
+                                        Text { text: "Document detection"; color: Theme.fg; font-size: 13px; font-weight: 600; }
+                                        if root.busy: Text {
+                                            text: "Settings are available when the current task finishes.";
+                                            color: Theme.muted; font-size: 11px; wrap: word-wrap; min-height: self.preferred-height;
                                         }
+                                        StackedField {
+                                            label: "Provider";
+                                            tip: "Connect a vision model you already run, or choose a cloud service. Model checks are optional and start only after you click Enable model checks.";
+                                            model-provider-input := ComboBox {
+                                                model: ["Ollama", "LM Studio", "vLLM (Linux / server)", "TypeSafe Jev", "OpenAI Decisions"];
+                                                current-index <=> root.model-provider;
+                                                enabled: !root.busy;
+                                                selected => { root.model-provider-changed(); }
+                                            }
+                                        }
+                                        if root.model-provider < 3: StackedField {
+                                            label: "API base URL";
+                                            tip: "Ollama usually uses http://localhost:11434/v1, LM Studio :1234/v1 and vLLM :8000/v1. Replace localhost with your server address when it runs on another computer.";
+                                            LineEdit { text <=> root.model-endpoint; enabled: !root.busy; edited => { root.model-config-changed(); } }
+                                        }
+                                        StackedField {
+                                            label: "Vision model";
+                                            tip: "Enter the exact name of a model that accepts images. In LM Studio or vLLM, use the loaded/served model's name.";
+                                            LineEdit { text <=> root.model-name; placeholder-text: "Your loaded vision model"; enabled: !root.busy; edited => { root.model-config-changed(); } }
+                                        }
+                                        StackedField {
+                                            label: root.model-provider >= 3 ? "API key" : "Server API key (optional)";
+                                            tip: "The key stays in memory for this session. It is never saved in a mosaic or settings file. OpenAI and Jev can also read OPENAI_API_KEY or TYPESAFE_API_KEY from the environment.";
+                                            LineEdit { text <=> root.model-api-key; input-type: password; enabled: !root.busy; edited => { root.model-config-changed(); } }
+                                        }
+                                        Text {
+                                            text: root.model-provider >= 3
+                                                ? "Sends photo previews to " + (root.model-provider == 3 ? "TypeSafe" : "OpenAI") + ". API charges may apply." + (root.model-provider == 3 ? " Image support is experimental." : "")
+                                                : "Sends photo previews to the server above. Use a vision model on a server you trust.";
+                                            color: Theme.muted;
+                                            font-size: 11px;
+                                            wrap: word-wrap;
+                                            min-height: self.preferred-height;
+                                        }
+                                        Text { text: "API keys stay in memory for this session. They are not saved in your mosaic."; color: Theme.muted; font-size: 11px; wrap: word-wrap; min-height: self.preferred-height; }
+                                        VerticalLayout {
+                                            spacing: 6px;
+                                            Button { text: "Test with image…"; enabled: !root.busy; clicked => { root.test-model(); } }
+                                            Button {
+                                                text: root.model-active ? "Use offline only" : "Enable model checks";
+                                                enabled: !root.busy;
+                                                clicked => { if root.model-active { root.disable-model(); } else { root.enable-model(); } }
+                                            }
+                                        }
+                                        Rectangle {
+                                            background: Theme.bg;
+                                            border-radius: 6px;
+                                            min-height: model-state.preferred-height;
+                                            model-state := VerticalLayout {
+                                                padding: 10px;
+                                                model-status-text := Text { text: root.model-status; color: Theme.fg; font-size: 11px; wrap: word-wrap; min-height: self.preferred-height; }
+                                            }
+                                        }
+                                        Text { text: "Results are cached. The first pass through a large collection can take a while."; color: Theme.muted; font-size: 11px; wrap: word-wrap; min-height: self.preferred-height; }
                                     }
-                                    Text { text: root.model-status; color: Theme.muted; font-size: 11px; wrap: word-wrap; }
-                                    Text { text: "Results are cached. The first pass through a large collection can take a while. Model connections are enabled for this session only."; color: Theme.muted; font-size: 11px; wrap: word-wrap; }
                                 }
                             }
                         }

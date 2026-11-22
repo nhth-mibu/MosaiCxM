@@ -1902,6 +1902,56 @@ mod tests {
     use super::crop_hint;
 
     #[test]
+    #[cfg(debug_assertions)]
+    fn model_panel_fields_fill_sidebar_and_status_stays_inside_card() {
+        use super::*;
+        use i_slint_backend_testing::{ElementHandle, TestingBackend, TestingBackendOptions};
+        slint::platform::set_platform(Box::new(TestingBackend::new(TestingBackendOptions {
+            mock_time: true, threading: false, renderer_name: Some("software".into()),
+        }))).unwrap();
+        let ui = AppWindow::new().unwrap();
+        ui.window().set_size(slint::LogicalSize::new(1280.0, 1200.0));
+        ui.set_model_provider(3);
+        ui.set_model_name("jev-1.14.0".into());
+        ui.set_model_status("Offline checks only. Test or enable the model after editing its settings.".into());
+        ui.set_folders(ModelRc::new(VecModel::from(vec![FolderRow { path: "/Volumes/Photos/JPG".into(), ..Default::default() }])));
+        ui.set_photo_count(65_319);
+        ui.set_photos_summary("65,319 photos".into());
+        ui.set_skipped_count(40);
+        ui.show().unwrap();
+        let find = |id| ElementHandle::find_by_element_id(&ui, id).next().unwrap();
+        find("AppWindow::model-setup-toggle").mock_single_click(slint::platform::PointerEventButton::Left);
+        use slint::private_unstable_api::re_exports::ColorScheme;
+        for scheme in [ColorScheme::Light, ColorScheme::Dark] {
+            ui.global::<Palette>().set_color_scheme(scheme);
+            for scale in [1.0, 2.0] {
+                ui.window().dispatch_event(slint::platform::WindowEvent::ScaleFactorChanged { scale_factor: scale });
+                // The testing adapter treats set_size as scale 1. Supply its
+                // physical size, then deliver the matching logical resize.
+                ui.window().set_size(slint::PhysicalSize::new((1280.0 * scale) as u32, (1200.0 * scale) as u32));
+                ui.window().dispatch_event(slint::platform::WindowEvent::Resized { size: slint::LogicalSize::new(1280.0, 1200.0) });
+                for busy in [false, true] {
+                    ui.set_busy(busy);
+                    let panel = find("AppWindow::model-settings");
+                    let provider = find("AppWindow::model-provider-input");
+                    assert!(provider.size().width >= panel.size().width * 0.85, "provider control should use the panel width, not share a cramped row with its label");
+                    let status = find("AppWindow::model-status-text");
+                    let card = find("AppWindow::photos-card");
+                    assert!(status.absolute_position().y + status.size().height <= card.absolute_position().y + card.size().height - 10.0, "wrapped status must not cross the card border");
+                }
+            }
+        }
+        ui.set_busy(false);
+        if let Some(path) = std::env::var_os("MOSAIC_PANEL_SNAPSHOT") {
+            let pixels = ui.window().take_snapshot().unwrap();
+            let frame = image::RgbaImage::from_raw(pixels.width(), pixels.height(), pixels.as_bytes().to_vec()).unwrap();
+            let card = find("AppWindow::photos-card");
+            let scale = ui.window().scale_factor();
+            image::imageops::crop_imm(&frame, (card.absolute_position().x * scale) as u32, (card.absolute_position().y * scale) as u32, (card.size().width * scale) as u32, (card.size().height * scale) as u32).to_image().save(Path::new(&path)).unwrap();
+        }
+    }
+
+    #[test]
     fn model_connections_require_enabling_and_edits_disconnect_them() {
         use super::*;
         i_slint_backend_testing::init_no_event_loop();

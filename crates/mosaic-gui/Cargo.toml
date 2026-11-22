@@ -22,7 +22,7 @@ webbrowser = "1"
 opener = { version = "0.8", features = ["reveal"] }
 
 [dev-dependencies]
-i-slint-backend-testing = "1.18"
+i-slint-backend-testing = { version = "1.18", features = ["renderer-software"] }
 
 [build-dependencies]
 slint-build = "1.18"
