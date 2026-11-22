@@ -50,7 +50,7 @@ impl PdfPlan {
             "Artwork: {:.0} × {:.0} mm, printed at {} DPI ({} × {} px overall)\n\
              Paper: {} {} ({:.1} × {:.1} mm), margins {:?} mm, overlap {} mm, marks {}\n\
              Usable artwork per page: {:.1} × {:.1} mm\n\
-             Print pages: {} ({} columns × {} rows{}) + 1 assembly overview page\n\
+             Print pages: {} ({} columns × {} rows{}) + 1 A4 assembly overview page\n\
              Largest page image: {} × {} px\n\
              Estimated peak memory: {}, estimated PDF size: {}\n",
             l.art_w,
@@ -233,10 +233,13 @@ pub fn export_pdf(project: &Project, source: &dyn TileSource, overview: Option<&
     let media = format!("[0 0 {:.4} {:.4}]", sw * PT_PER_MM, sh * PT_PER_MM);
     let mut kids = Vec::new();
 
-    // --- Overview / assembly map page.
+    // --- Overview / assembly map page. Its fixed-size instructions and
+    // calibration marks use A4, independently of the mosaic sheet settings.
     {
-        let mut c = Content::new(sh);
-        let m = print.margins_mm;
+        let (guide_w, guide_h) = (210.0, 297.0);
+        let guide_media = format!("[0 0 {:.4} {:.4}]", guide_w * PT_PER_MM, guide_h * PT_PER_MM);
+        let mut c = Content::new(guide_h);
+        let m = [6.0; 4];
         let left = m[3] + 4.0;
         let mut y = m[0] + 8.0;
         c.text(left, y, 14.0, true, "Photo mosaic - assembly map");
@@ -263,11 +266,11 @@ pub fn export_pdf(project: &Project, source: &dyn TileSource, overview: Option<&
         }
         y += 6.0;
         // Calibration square and ruler.
-        let cal_fits = sw - m[1] - left > 120.0;
+        let cal_fits = guide_w - m[1] - left > 120.0;
         if cal_fits {
             c.rect(left, y, 50.0, 50.0, 0.5);
             c.text(left + 12.0, y + 26.0, 8.0, true, "50 × 50 mm");
-            c.ruler(left + 60.0, y + 10.0, 100.0f64.min(sw - m[1] - left - 64.0).floor());
+            c.ruler(left + 60.0, y + 10.0, 100.0f64.min(guide_w - m[1] - left - 64.0).floor());
             c.text(left + 60.0, y + 16.0, 7.0, false, "0");
             c.text(left + 156.0, y + 16.0, 7.0, false, "100 mm");
             y += 56.0;
@@ -277,8 +280,8 @@ pub fn export_pdf(project: &Project, source: &dyn TileSource, overview: Option<&
             y += 56.0;
         }
         // Map: preview with page grid.
-        let avail_w = sw - left - m[1] - 4.0;
-        let avail_h = sh - y - m[2] - 6.0;
+        let avail_w = guide_w - left - m[1] - 4.0;
+        let avail_h = guide_h - y - m[2] - 6.0;
         let s = (avail_w / layout.art_w).min(avail_h / layout.art_h);
         if s > 0.0 {
             let (mw, mh) = (layout.art_w * s, layout.art_h * s);
@@ -305,7 +308,7 @@ pub fn export_pdf(project: &Project, source: &dyn TileSource, overview: Option<&
             let content = pdf.alloc();
             pdf.stream(content, "", c.s.as_bytes())?;
             let page = pdf.alloc();
-            pdf.obj(page, &format!("<< /Type /Page /Parent {pages_obj} 0 R /MediaBox {media} /Contents {content} 0 R /Resources << /Font << /F1 {f1} 0 R /F2 {f2} 0 R >> {resources_img} >> >>"))?;
+            pdf.obj(page, &format!("<< /Type /Page /Parent {pages_obj} 0 R /MediaBox {guide_media} /Contents {content} 0 R /Resources << /Font << /F1 {f1} 0 R /F2 {f2} 0 R >> {resources_img} >> >>"))?;
             kids.push(page);
         } else {
             bail!("paper too small for the assembly map");

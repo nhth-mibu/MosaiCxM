@@ -529,7 +529,7 @@ fn update_export_summary(ui: &AppWindow, st: &State) {
     } else {
         print_settings(ui).and_then(|ps| plan_pdf(&p, &ps)).map(|pl| {
             format!(
-                "{} pages ({} across × {} down{}) on {} {}, plus 1 assembly page\nFile size about {}",
+                "{} pages ({} across × {} down{}) on {} {}, plus 1 A4 assembly page\nFile size about {}",
                 pl.printed_pages(),
                 pl.layout.cols,
                 pl.layout.rows,

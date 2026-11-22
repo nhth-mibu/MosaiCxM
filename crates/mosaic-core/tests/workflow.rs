@@ -275,6 +275,38 @@ fn cancelled_and_failed_exports_leave_nothing() {
 }
 
 #[test]
+fn pdf_assembly_guide_does_not_change_custom_print_sheet_size() {
+    let (e, a) = indexed_env(6);
+    let p = make_project(&e, &[a], MatchSettings::for_method(Method::Classic), 3, 2);
+    let source = thumbs_source(&e, &p);
+    let overview = mosaic_core::render::render_preview(&e.cat, &p, 48, &Job::default()).unwrap();
+    let media_box = |w: f64, h: f64| format!("/MediaBox [0 0 {:.4} {:.4}]", w * 72.0 / 25.4, h * 72.0 / 25.4);
+    for (landscape, margins, w, h) in [
+        (false, [0.0; 4], 150.0, 100.0),
+        (true, [0.0; 4], 100.0, 150.0),
+        (false, [40.0, 5.0, 40.0, 5.0], 150.0, 100.0),
+    ] {
+        let mut ps = PrintSettings::custom(150.0, 100.0);
+        ps.landscape = landscape;
+        ps.margins_mm = margins;
+        ps.overlap_mm = 0.0;
+        ps.marks = false;
+        ps.dpi = 30.0;
+        let plan = plan_pdf(&p, &ps).unwrap();
+        let out = e.root.join("custom.pdf");
+        export_pdf(&p, &source, Some(&overview), &plan, &out, &Job::default()).unwrap();
+        let bytes = std::fs::read(&out).unwrap();
+        let text = String::from_utf8_lossy(&bytes);
+        let pages: Vec<&str> = text.lines().filter(|l| l.contains("/Type /Page ")).collect();
+        assert_eq!(pages.len(), plan.printed_pages() + 1);
+        assert!(pages[0].contains(&media_box(210.0, 297.0)), "assembly guide must use A4");
+        for page in &pages[1..] {
+            assert!(page.contains(&media_box(w, h)), "mosaic sheets must keep the custom paper size and orientation");
+        }
+    }
+}
+
+#[test]
 fn missing_and_changed_sources_are_reported_not_substituted() {
     let (e, a) = indexed_env(25);
     let mut s = MatchSettings::for_method(Method::Classic);

@@ -88,7 +88,7 @@ Want more control? Open **Advanced** for the grid, how often each photo may be u
 
 Tick **Also save a list of the photos used** if you want a list of every photo in the mosaic.
 
-**Printing at home:** print the PDF at **100% / Actual size** with **Fit to page turned off**. Measure the 50 mm square on the first page before you print the rest. The pages overlap a little so you can glue them together; the first page shows how they fit.
+**Printing at home:** print the PDF at **100% / Actual size** with **Fit to page turned off**. The first page is an A4 assembly guide; the mosaic pages use your chosen paper size. Measure the 50 mm square on the first page before you print the rest. The pages overlap a little so you can glue them together; the first page shows how they fit.
 
 ### 5 Statistics (blue)
 

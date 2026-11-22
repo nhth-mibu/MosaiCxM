@@ -116,12 +116,6 @@ component Hint inherits Text {
     wrap: word-wrap;
 }
 
-// Wrapped hint inside a step card. The width is fixed so the layout can
-// work out how many lines the text needs (the step column is fixed too).
-component StepHint inherits Hint {
-    width: 304px;
-}
-
 // Dark box shown inside every tooltip. The text wraps at 300 px.
 component TipBox inherits Rectangle {
     in property <string> text;
@@ -858,6 +852,13 @@ export component AppWindow inherits Window {
     icon: @image-url("icon.png");
     background: Theme.bg;
 
+    private property <length> steps-width: 360px;
+    // Leave at least 420px for the right side and 8px for the divider.
+    private property <length> max-steps-width: max(360px, min(root.width * 0.6, root.width - 420px - 8px));
+    changed width => {
+        root.steps-width = clamp(root.steps-width, 360px, root.max-steps-width);
+    }
+
     // ----- which step is open, and what the big area on the right shows
     in-out property <int> open-step: 1;
     in-out property <int> main-view: 0; // 0 preview, 1 motif suggestions, 2 info text, 3 statistics, 4 folder check, 5 help
@@ -1102,7 +1103,7 @@ export component AppWindow inherits Window {
             title: "Print and glue the pages",
             tint: Theme.violet,
             picture: @image-url("help/print.jpg"),
-            intro: "The PDF has a map on the first page. The other pages are the parts of the mosaic. Each page has a name, for example A1.",
+            intro: "The PDF has a map on the first page, which is always A4. The other pages use your chosen paper size and are the parts of the mosaic. Each page has a name, for example A1.",
             steps: [
                 "Print all pages at 100% (Actual size). Turn off Fit to page and borderless printing.",
                 "Measure the square on the first page. It must be 50 × 50 mm. If it is not, correct the printer settings.",
@@ -1305,10 +1306,9 @@ export component AppWindow inherits Window {
             vertical-stretch: 1;
 
             // ===================== steps
-            Rectangle {
-                width: 360px;
+            steps-panel := Rectangle {
+                width: root.steps-width;
                 background: Theme.surface;
-                Rectangle { x: parent.width - 1px; width: 1px; background: Theme.line; }
                 steps-scroll := ScrollView {
                     VerticalLayout {
                         width: steps-scroll.visible-width;
@@ -1514,7 +1514,7 @@ export component AppWindow inherits Window {
                                     tip: "Auto makes the letters light on a dark picture and dark on a light picture.";
                                     ComboBox { model: ["Auto", "Light", "Dark"]; current-index <=> root.message-tone; selected => { root.changed(); } }
                                 }
-                                StepHint { text: root.grid-info; }
+                                Hint { width: parent.width; text: root.grid-info; }
                                 Tipped {
                                     tip: "How the app selects a photo for each tile. Point at each style to read more.";
                                     Label { text: "Style"; font-size: 13px; }
@@ -1671,7 +1671,7 @@ export component AppWindow inherits Window {
                                         }
                                     }
                                 }
-                                if root.export-report != "": StepHint { text: root.export-report; }
+                                if root.export-report != "": Hint { width: parent.width; text: root.export-report; }
                             }
                         }
 
@@ -1721,6 +1721,26 @@ export component AppWindow inherits Window {
                         }
                     }
                 }
+            }
+
+            // Drag the divider to resize the steps without covering the preview.
+            Rectangle {
+                width: 8px;
+                background: resize-handle.has-hover || resize-handle.pressed ? Theme.blue-soft : Theme.bg;
+                Rectangle {
+                    x: (parent.width - self.width) / 2;
+                    width: 2px;
+                    background: resize-handle.has-hover || resize-handle.pressed ? Theme.blue : Theme.line;
+                }
+                resize-handle := TouchArea {
+                    mouse-cursor: ew-resize;
+                    moved => {
+                        if self.pressed {
+                            root.steps-width = clamp(steps-panel.width + self.mouse-x - self.pressed-x, 360px, root.max-steps-width);
+                        }
+                    }
+                }
+                Tooltip { TipBox { text: "Drag to resize the left panel."; } }
             }
 
             // ===================== right side: preview, suggestions or info
