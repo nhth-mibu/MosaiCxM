@@ -9,7 +9,7 @@ use crate::decode;
 use crate::descriptor::{CELLS, DESCRIPTOR_VERSION};
 use crate::job::Job;
 use crate::matching::{GridSpec, MatchError, MatchSettings, MatchStats, Target, TileAssign};
-use crate::matching::match_tiles_masked;
+use crate::matching::{match_tiles_masked, reselect_tiles};
 use crate::pool::Pool;
 use crate::shape::Outline;
 use anyhow::{anyhow, bail, Context, Result};
@@ -118,6 +118,37 @@ impl Project {
             None => target,
         };
         let (tiles, stats) = match_tiles_masked(pool, target, &grid, &settings, active.as_deref(), job)?;
+        Ok(Self::from_assignments(pool, motif, libraries, grid, settings, outline, &target.cells(), tiles, stats))
+    }
+
+    /// Replace one tile, or choose a fresh selection for the entire motif.
+    /// Uses the saved target, so the motif and shape files need not be present.
+    pub fn reselect(&self, pool: &Pool, only: Option<usize>, job: &Job) -> Result<Project> {
+        job.check()?;
+        let by_hash: HashMap<_, _> = pool.photos.iter().enumerate().map(|(i, p)| (hex(&p.hash), i as u32)).collect();
+        let source_ids: Vec<u32> = self.sources.iter().map(|s| by_hash.get(&s.hash).copied().ok_or_else(|| anyhow!("a source photo is no longer indexed; update the preview first"))).collect::<Result<_>>()?;
+        let previous: Vec<_> = self.tiles.iter().map(|t| {
+            let mut t = *t;
+            if !t.is_empty() { t.photo = source_ids[t.photo as usize]; }
+            t
+        }).collect();
+        let cells = self.target_cells()?;
+        // Stored cells already include the hidden message; do not apply it twice.
+        let target = Target::from_cells(self.grid.cols, self.grid.rows, &cells);
+        let mut settings = self.settings.clone();
+        settings.seed = settings.seed.wrapping_add(1) % 1_000_001;
+        let (tiles, stats) = reselect_tiles(pool, &target, &self.grid, &settings, &previous, only, job).map_err(|e| match e { MatchError::Other(e) => e, e => anyhow::Error::new(e) })?;
+        if tiles.iter().zip(&previous).all(|(a, b)| a.photo == b.photo) {
+            bail!("no different photo selection is available within the reuse limit; add photos or raise the maximum reuse");
+        }
+        job.check()?;
+        let mut p = Self::from_assignments(pool, self.motif.clone(), self.libraries.clone(), self.grid, settings, self.outline.clone(), &cells, tiles, stats);
+        p.target_cells = self.target_cells.clone();
+        Ok(p)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn from_assignments(pool: &Pool, motif: MotifRef, libraries: Vec<LibraryRef>, grid: GridSpec, settings: MatchSettings, outline: Option<Outline>, cells: &[Lab], tiles: Vec<TileAssign>, stats: MatchStats) -> Self {
         // Keep only the photos actually used, in first-use order.
         let mut remap: HashMap<u32, u32> = HashMap::new();
         let mut sources = Vec::new();
@@ -137,7 +168,7 @@ impl Project {
                 t
             })
             .collect();
-        Ok(Project {
+        Project {
             format: PROJECT_FORMAT,
             app_version: env!("CARGO_PKG_VERSION").to_string(),
             motif,
@@ -147,10 +178,10 @@ impl Project {
             descriptor_version: DESCRIPTOR_VERSION,
             sources,
             tiles,
-            target_cells: encode_cells(&target.cells()),
+            target_cells: encode_cells(cells),
             stats,
             outline,
-        })
+        }
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {

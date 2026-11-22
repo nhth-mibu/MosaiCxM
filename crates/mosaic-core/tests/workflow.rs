@@ -168,6 +168,139 @@ fn matching_is_deterministic() {
 }
 
 #[test]
+fn source_filters_combine_and_survive_selection_and_project_reload() {
+    use mosaic_core::{faces::Face, filters::{Colour, People, PhotoFilters}};
+    let e = env();
+    let dir = e.root.join("photos");
+    write_photos(&dir, 0..3);
+    for i in 0..2 {
+        RgbImage::from_fn(192, 192, |x, y| {
+            let v = ((x + y) / 3 + i * 60) as u8;
+            image::Rgb([v, v, v])
+        }).save(dir.join(format!("portrait-{i}.png"))).unwrap();
+    }
+    photo(40).save(dir.join("Screenshot 2026-11-22.png")).unwrap();
+    let lib = e.cat.create_library("Photos").unwrap();
+    e.cat.add_root(lib, &dir).unwrap();
+    update_library(&e.cat, lib, &opts(), &Job::default()).unwrap();
+    let mut expected = Vec::new();
+    for i in 0..2 {
+        let hash = *blake3::hash(&std::fs::read(dir.join(format!("portrait-{i}.png"))).unwrap()).as_bytes();
+        e.cat.put_faces(&hash, &[Face { rect: [0.3, 0.2, 0.3, 0.3], score: 1.0 }]).unwrap();
+        expected.push(mosaic_core::catalog::hex(&hash));
+    }
+    let pool = Pool::load(&e.cat, &[lib], true).unwrap();
+    let f = PhotoFilters { people: People::Portraits, colour: Colour::BlackAndWhite, skip_documents: true };
+    let filtered = f.apply(&pool, &e.cat, &[lib], true, &Job::default()).unwrap();
+    assert_eq!(filtered.photos.len(), 2);
+    assert_eq!(filtered.group_count, 2, "filtering must renumber duplicate groups");
+    let s = MatchSettings { photo_filters: f.clone(), ..MatchSettings::for_method(Method::Classic) };
+    let grid = GridSpec::new(200.0, 150.0, 2, 1).unwrap();
+    let path = e.root.join("motif.png");
+    motif(&path);
+    let (t, mref) = load_target(&path, &grid).unwrap();
+    let p = Project::create(&filtered, libraries_refs(&e.cat, &[lib]).unwrap(), &t, mref, grid, s, &Job::default()).unwrap();
+    for only in [Some(0), None] {
+        let q = p.reselect(&filtered, only, &Job::default()).unwrap();
+        assert!(q.sources.iter().all(|s| expected.contains(&s.hash)));
+        let path = e.root.join("filtered.json");
+        q.save(&path).unwrap();
+        assert_eq!(Project::load(&path).unwrap().settings.photo_filters, f);
+    }
+    let documents = PhotoFilters { skip_documents: true, ..Default::default() };
+    let without_screenshots = documents.apply(&pool, &e.cat, &[lib], true, &Job::default()).unwrap();
+    assert_eq!(without_screenshots.photos.len(), pool.photos.len() - 1);
+    let no_portraits = Pool { photos: pool.photos.iter().filter(|p| p.faces.is_empty()).cloned().collect(), group_count: pool.group_count };
+    assert!(f.apply(&no_portraits, &e.cat, &[lib], true, &Job::default()).unwrap_err().to_string().contains("no photos match"));
+    let mut old = serde_json::to_value(&p).unwrap();
+    old["settings"].as_object_mut().unwrap().remove("photo_filters");
+    let path = e.root.join("old-project.json");
+    std::fs::write(&path, serde_json::to_vec(&old).unwrap()).unwrap();
+    assert_eq!(Project::load(&path).unwrap().settings.photo_filters, PhotoFilters::default());
+}
+
+#[test]
+fn swapping_one_photo_preserves_other_tiles_and_saved_export() {
+    let (e, lib) = indexed_env(24);
+    let pool = Pool::load(&e.cat, &[lib], true).unwrap();
+    for method in Method::ALL {
+        let mut s = MatchSettings::for_method(method);
+        s.max_reuse = Some(2);
+        s.color_correction = 0.3;
+        let p = make_project(&e, &[lib], s, 4, 3);
+        let q = p.reselect(&pool, Some(5), &Job::default()).unwrap();
+        for (i, (old, new)) in p.tiles.iter().zip(&q.tiles).enumerate() {
+            let old_hash = &p.sources[old.photo as usize].hash;
+            let new_hash = &q.sources[new.photo as usize].hash;
+            if i == 5 {
+                assert_ne!(old_hash, new_hash, "{method:?}");
+            } else {
+                assert_eq!(old_hash, new_hash, "only the clicked tile may change");
+                assert_eq!(old.crop, new.crop);
+                assert_eq!(old.adjust, new.adjust);
+            }
+        }
+        assert!(q.usage().iter().all(|&n| (1..=2).contains(&n)));
+        assert_eq!(q.stats.distinct_used, q.sources.len());
+        let path = e.root.join("swapped.json");
+        q.save(&path).unwrap();
+        let restored = Project::load(&path).unwrap();
+        assert_eq!(q.tiles, restored.tiles);
+        let preview = mosaic_core::render::render_preview(&e.cat, &q, 24, &Job::default()).unwrap();
+        assert_eq!(preview, mosaic_core::render::render_preview(&e.cat, &restored, 24, &Job::default()).unwrap());
+        assert_ne!(preview, mosaic_core::render::render_preview(&e.cat, &p, 24, &Job::default()).unwrap());
+        assert!(check_sources(&e.cat, &restored, &Job::default()).unwrap().ok());
+    }
+}
+
+#[test]
+fn fresh_selection_changes_even_unlimited_classic_and_handles_full_capacity() {
+    let (e, lib) = indexed_env(12);
+    let pool = Pool::load(&e.cat, &[lib], true).unwrap();
+    for method in Method::ALL {
+        for cap in [None, Some(1)] {
+            let mut s = MatchSettings::for_method(method);
+            s.max_reuse = cap;
+            let p = make_project(&e, &[lib], s, 4, 3);
+            let q = p.reselect(&pool, None, &Job::default()).unwrap();
+            let hashes = |p: &Project| p.tiles.iter().map(|t| p.sources[t.photo as usize].hash.clone()).collect::<Vec<_>>();
+            assert_ne!(hashes(&p), hashes(&q), "{method:?} {cap:?}");
+            assert_eq!(p.target_cells, q.target_cells);
+            assert!(q.usage().iter().all(|&n| n > 0 && cap.is_none_or(|c| n <= c)));
+            if cap == Some(1) {
+                assert!(p.reselect(&pool, Some(0), &Job::default()).unwrap_err().to_string().contains("reuse limit"));
+            }
+        }
+    }
+    let p = make_project(&e, &[lib], MatchSettings::for_method(Method::Classic), 4, 3);
+    let job = Job::default();
+    job.cancel();
+    assert!(is_cancelled(&p.reselect(&pool, None, &job).unwrap_err()));
+}
+
+#[test]
+fn reselection_preserves_outline_and_hidden_message_without_original_files() {
+    use mosaic_core::{message::HiddenMessage, shape::{Outline, Shape}};
+    let (e, lib) = indexed_env(20);
+    let pool = Pool::load(&e.cat, &[lib], true).unwrap();
+    let grid = GridSpec::new(200.0, 150.0, 20, 16).unwrap();
+    let m = e.root.join("motif.png");
+    motif(&m);
+    let (t, mref) = load_target(&m, &grid).unwrap();
+    let mut s = MatchSettings::for_method(Method::Variety);
+    s.hidden_message = Some(HiddenMessage::new("A"));
+    let p = Project::create_with_outline(&pool, libraries_refs(&e.cat, &[lib]).unwrap(), &t, mref, grid, s, Some(Outline::new(Shape::Ellipse)), &Job::default()).unwrap();
+    std::fs::remove_file(&m).unwrap();
+    let q = p.reselect(&pool, None, &Job::default()).unwrap();
+    assert_eq!(q.outline, p.outline);
+    assert_eq!(q.target_cells, p.target_cells, "the hidden message must not be applied twice");
+    assert_eq!(q.stats.tiles, p.stats.tiles);
+    assert!(p.tiles.iter().zip(&q.tiles).all(|(a, b)| a.is_empty() == b.is_empty()));
+    let empty = p.tiles.iter().position(|t| t.is_empty()).unwrap();
+    assert!(p.reselect(&pool, Some(empty), &Job::default()).is_err());
+}
+
+#[test]
 fn rendering_is_identical_across_region_boundaries() {
     let e = env();
     write_photos(&e.root.join("a"), 0..40);

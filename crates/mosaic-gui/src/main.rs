@@ -12,6 +12,7 @@
 use anyhow::{anyhow, bail, Context, Result};
 use mosaic_core::catalog::{Catalog, LibraryInfo};
 use mosaic_core::export::{export_raster, plan_raster, RasterFormat};
+use mosaic_core::filters::{Colour, People, PhotoFilters};
 use mosaic_core::decode::{decode_file, resize_crop};
 use mosaic_core::indexer::{update_library, walk_images, IndexOptions, IMAGE_EXTENSIONS};
 use mosaic_core::job::{is_cancelled, Job};
@@ -61,7 +62,7 @@ struct State {
     /// (library id, folder path) for each row of the folder list.
     folders: Vec<(i64, PathBuf)>,
     project: Option<Arc<Project>>,
-    pool: Option<(Vec<i64>, bool, Arc<Pool>)>,
+    pool: Option<(Vec<i64>, bool, PhotoFilters, Arc<Pool>)>,
     job: Option<Job>,
     suggestion_paths: Vec<Option<PathBuf>>,
     /// Statistics of the current project, once counted.
@@ -273,6 +274,11 @@ fn read_settings(ui: &AppWindow) -> Result<(GridSpec, MatchSettings)> {
     s.crop_offsets = ui.get_crop_offsets();
     s.face_crop = ui.get_face_crop();
     s.seed = ui.get_seed().max(0) as u64;
+    s.photo_filters = PhotoFilters {
+        people: match ui.get_people_filter() { 1 => People::Portraits, 2 => People::NoPeople, _ => People::Any },
+        colour: match ui.get_colour_filter() { 1 => Colour::Colour, 2 => Colour::BlackAndWhite, _ => Colour::Any },
+        skip_documents: ui.get_skip_documents(),
+    };
     s.color_correction = ui.get_color_correction();
     s.motif_blend = ui.get_motif_blend();
     let text = ui.get_hidden_message();
@@ -389,14 +395,16 @@ fn update_grid_info(ui: &AppWindow, st: &State) {
     }
 }
 
-fn load_pool(st: &Shared, cat: &Catalog, libs: &[i64], merge: bool) -> Result<Arc<Pool>> {
-    if let Some((l, m, p)) = &st.lock().unwrap().pool {
-        if l == libs && *m == merge {
+fn load_pool(st: &Shared, cat: &Catalog, libs: &[i64], settings: &MatchSettings, job: &Job) -> Result<Arc<Pool>> {
+    let merge = settings.merge_near_duplicates;
+    if let Some((l, m, f, p)) = &st.lock().unwrap().pool {
+        if l == libs && *m == merge && f == &settings.photo_filters {
             return Ok(p.clone());
         }
     }
-    let p = Arc::new(Pool::load(cat, libs, merge)?);
-    st.lock().unwrap().pool = Some((libs.to_vec(), merge, p.clone()));
+    let p = Pool::load(cat, libs, merge)?;
+    let p = Arc::new(if settings.photo_filters == PhotoFilters::default() { p } else { settings.photo_filters.apply(&p, cat, libs, merge, job)? });
+    st.lock().unwrap().pool = Some((libs.to_vec(), merge, settings.photo_filters.clone(), p.clone()));
     Ok(p)
 }
 
@@ -574,6 +582,9 @@ fn show_project(ui: &AppWindow, s: &mut State, p: Project, buf: SharedPixelBuffe
         ui.set_crop_offsets(p.settings.crop_offsets);
         ui.set_face_crop(p.settings.face_crop);
         ui.set_seed(p.settings.seed as i32);
+        ui.set_people_filter(match p.settings.photo_filters.people { People::Any => 0, People::Portraits => 1, People::NoPeople => 2 });
+        ui.set_colour_filter(match p.settings.photo_filters.colour { Colour::Any => 0, Colour::Colour => 1, Colour::BlackAndWhite => 2 });
+        ui.set_skip_documents(p.settings.photo_filters.skip_documents);
         ui.set_color_correction(p.settings.color_correction);
         ui.set_motif_blend(p.settings.motif_blend);
         let hm = p.settings.hidden_message.as_ref();
@@ -623,6 +634,41 @@ fn show_project(ui: &AppWindow, s: &mut State, p: Project, buf: SharedPixelBuffe
     s.project = Some(p);
     update_grid_info(ui, s);
     update_export_summary(ui, s);
+}
+
+/// Choose alternatives on a worker, keeping the current zoom and centre.
+fn reselect_preview(ui: &AppWindow, st: &Shared, only: Option<usize>) {
+    if ui.get_busy() || ui.get_preview_stale() {
+        return;
+    }
+    let Some(previous) = st.lock().unwrap().project.clone() else { return };
+    let revision = ui.get_settings_revision();
+    let (zoom, cx, cy, distance) = (ui.get_preview_zoom(), ui.get_preview_cx(), ui.get_preview_cy(), ui.get_preview_distance());
+    let shared = st.clone();
+    let label = if only.is_some() { "Swapping photo" } else { "Choosing new photos" };
+    run_job(ui, st, label, move |job, dd| {
+        let cat = Catalog::open(&dd)?;
+        let pool = load_pool(&shared, &cat, &previous.library_ids(), &previous.settings, job)?;
+        let p = previous.reselect(&pool, only, job)?;
+        let tile_px = (2400 / p.grid.cols.max(p.grid.rows)).clamp(4, 48);
+        let buf = to_image(&render_preview(&cat, &p, tile_px, job)?);
+        job.check()?;
+        Ok(Box::new(move |ui: &AppWindow, s: &mut State| {
+            if ui.get_settings_revision() != revision || !s.project.as_ref().is_some_and(|cur| Arc::ptr_eq(cur, &previous)) {
+                return;
+            }
+            ui.set_seed(p.settings.seed as i32);
+            show_project(ui, s, p, buf, false);
+            ui.set_preview_zoom(zoom);
+            ui.set_preview_distance(distance);
+            ui.set_preview_goto_u(cx);
+            ui.set_preview_goto_v(cy);
+            ui.set_preview_goto_n(ui.get_preview_goto_n() + 1);
+            if let Err(e) = autosave(s) {
+                report_error(ui, e.context("could not autosave"));
+            }
+        }))
+    });
 }
 
 /// Shows the new preview zoomed out and gets its photos ready for zooming in.
@@ -1240,7 +1286,7 @@ fn main() -> Result<()> {
             let s2 = s.clone();
             run_job(&ui, &s, "Finding good pictures", move |job, dd| {
                 let cat = Catalog::open(&dd)?;
-                let pool = load_pool(&s2, &cat, &libs, settings.merge_near_duplicates)?;
+                let pool = load_pool(&s2, &cat, &libs, &settings, job)?;
                 let mut cands = Vec::new();
                 if !folder.trim().is_empty() {
                     cands.extend(MotifCandidate::from_folder(Path::new(folder.trim()))?);
@@ -1342,7 +1388,7 @@ fn main() -> Result<()> {
             let s2 = s.clone();
             run_job(&ui, &s, "Making preview", move |job, dd| {
                 let cat = Catalog::open(&dd)?;
-                let pool = load_pool(&s2, &cat, &libs, settings.merge_near_duplicates)?;
+                let pool = load_pool(&s2, &cat, &libs, &settings, job)?;
                 let (target, mref) = load_target(&motif, &grid)?;
                 let p = Project::create_with_outline(&pool, libraries_refs(&cat, &libs)?, &target, mref, grid, settings, outline, job).map_err(anyhow::Error::from)?;
                 let tile_px = (2400 / grid.cols.max(grid.rows)).clamp(4, 48);
@@ -1438,10 +1484,25 @@ fn main() -> Result<()> {
         });
     }
 
-    // Find my photo: click a tile to see its photo.
+    {
+        let (w, s) = (ui.as_weak(), st.clone());
+        ui.on_new_selection(move || reselect_preview(&w.unwrap(), &s, None));
+    }
     {
         let (w, s) = (ui.as_weak(), st.clone());
         ui.on_preview_tile_clicked(move |u, v| {
+            let ui = w.unwrap();
+            let tile = s.lock().unwrap().project.as_ref().and_then(|p| zoom::tile_at(p, u as f64, v as f64));
+            if let Some(tile) = tile {
+                reselect_preview(&ui, &s, Some(tile));
+            }
+        });
+    }
+
+    // Find my photo: right-click a tile to see its photo.
+    {
+        let (w, s) = (ui.as_weak(), st.clone());
+        ui.on_preview_tile_inspect(move |u, v| {
             let ui = w.unwrap();
             let shared = s.clone();
             let mut s = s.lock().unwrap();
@@ -1747,6 +1808,70 @@ fn save_manifest(cat: &Catalog, p: &Project, out: &Path) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::crop_hint;
+
+    #[test]
+    #[cfg(debug_assertions)]
+    fn preview_click_swaps_right_click_inspects_and_double_click_only_zooms() {
+        use slint::{ComponentHandle, platform::PointerEventButton as Mouse};
+        use std::{cell::Cell, rc::Rc, time::Duration};
+        i_slint_backend_testing::init_no_event_loop();
+        let ui = super::AppWindow::new().unwrap();
+        ui.window().set_size(slint::LogicalSize::new(1280.0, 900.0));
+        ui.set_has_preview(true);
+        let swaps = Rc::new(Cell::new(0));
+        let count = swaps.clone();
+        ui.on_preview_tile_clicked(move |u, v| { assert!((0.0..1.0).contains(&u) && (0.0..1.0).contains(&v)); count.set(count.get() + 1); });
+        let inspections = Rc::new(Cell::new(0));
+        let count = inspections.clone();
+        ui.on_preview_tile_inspect(move |_, _| count.set(count.get() + 1));
+        ui.show().unwrap();
+        let preview = i_slint_backend_testing::ElementHandle::find_by_element_id(&ui, "ZoomView::ta").next().unwrap();
+        preview.mock_single_click(Mouse::Left);
+        i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(300));
+        assert_eq!(swaps.get(), 1);
+        preview.mock_single_click(Mouse::Right);
+        i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(300));
+        assert_eq!(inspections.get(), 1);
+        assert_eq!(swaps.get(), 1);
+        i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(600));
+        preview.mock_single_click(Mouse::Left);
+        preview.mock_single_click(Mouse::Left);
+        i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(300));
+        assert_eq!(swaps.get(), 1, "double-click must not swap a photo");
+        assert!(ui.get_preview_zoom() > 1.0);
+        let pos = preview.absolute_position();
+        preview.mock_drag(slint::LogicalPosition::new(pos.x + 60.0, pos.y + 60.0), Mouse::Left);
+        i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(300));
+        assert_eq!(swaps.get(), 1, "dragging must not swap a photo");
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    fn new_selection_requires_current_idle_preview_and_filters_reach_settings() {
+        use slint::{ComponentHandle, platform::PointerEventButton as Mouse};
+        use std::{cell::Cell, rc::Rc};
+        i_slint_backend_testing::init_no_event_loop();
+        let ui = super::AppWindow::new().unwrap();
+        ui.set_has_preview(true);
+        ui.set_people_filter(1);
+        ui.set_colour_filter(2);
+        ui.set_skip_documents(true);
+        let settings = super::read_settings(&ui).unwrap().1;
+        assert_eq!(settings.photo_filters, super::PhotoFilters { people: super::People::Portraits, colour: super::Colour::BlackAndWhite, skip_documents: true });
+        let selections = Rc::new(Cell::new(0));
+        let count = selections.clone();
+        ui.on_new_selection(move || count.set(count.get() + 1));
+        ui.show().unwrap();
+        let button = i_slint_backend_testing::ElementHandle::find_by_accessible_label(&ui, "New photo selection").next().unwrap();
+        button.mock_single_click(Mouse::Left);
+        assert_eq!(selections.get(), 1);
+        for (busy, stale) in [(true, false), (false, true)] {
+            ui.set_busy(busy);
+            ui.set_preview_stale(stale);
+            button.mock_single_click(Mouse::Left);
+            assert_eq!(selections.get(), 1);
+        }
+    }
 
     #[test]
     #[cfg(debug_assertions)]

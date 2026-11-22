@@ -83,6 +83,9 @@ pub struct MatchSettings {
     pub face_crop: bool,
     pub merge_near_duplicates: bool,
     pub seed: u64,
+    /// Source-photo restrictions, saved with the project by the desktop app.
+    #[serde(default)]
+    pub photo_filters: crate::filters::PhotoFilters,
     /// Candidates retrieved per tile before reranking.
     pub candidates: usize,
     /// 0 = off. Fraction (≤ 0.5) of each tile's mean-colour error corrected at render time.
@@ -106,6 +109,7 @@ impl MatchSettings {
             face_crop: true,
             merge_near_duplicates: true,
             seed: 1,
+            photo_filters: crate::filters::PhotoFilters::default(),
             candidates: 48,
             color_correction: 0.0,
             motif_blend: 0.0,
@@ -492,6 +496,37 @@ pub fn match_tiles_masked(
     active: Option<&[bool]>,
     job: &Job,
 ) -> Result<(Vec<TileAssign>, MatchStats), MatchError> {
+    match_selection(pool, target, grid, s, active, None, job)
+}
+
+/// Choose alternatives to existing pool-indexed assignments. `only` limits
+/// the change to one tile; all other placements remain exactly as supplied.
+pub fn reselect_tiles(
+    pool: &Pool,
+    target: &Target,
+    grid: &GridSpec,
+    s: &MatchSettings,
+    previous: &[TileAssign],
+    only: Option<usize>,
+    job: &Job,
+) -> Result<(Vec<TileAssign>, MatchStats), MatchError> {
+    if previous.len() != grid.tiles() || only.is_some_and(|i| previous.get(i).is_none_or(TileAssign::is_empty)) {
+        return Err(anyhow::anyhow!("choose a photo tile inside the mosaic").into());
+    }
+    let active: Vec<bool> = previous.iter().map(|t| !t.is_empty()).collect();
+    match_selection(pool, target, grid, s, Some(&active), Some((previous, only)), job)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn match_selection(
+    pool: &Pool,
+    target: &Target,
+    grid: &GridSpec,
+    s: &MatchSettings,
+    active: Option<&[bool]>,
+    previous: Option<(&[TileAssign], Option<usize>)>,
+    job: &Job,
+) -> Result<(Vec<TileAssign>, MatchStats), MatchError> {
     s.validate()?;
     if pool.photos.is_empty() {
         return Err(anyhow::anyhow!("no source photos available").into());
@@ -509,15 +544,33 @@ pub fn match_tiles_masked(
     let mut stats = MatchStats { pool_photos: pool.photos.len(), pool_groups: pool.group_count, tiles: placed_tiles, ..Default::default() };
     let t0 = Instant::now();
     job.report("building candidates", 0, 1);
-    let cands = build_candidates(pool, grid.tile_aspect(), s.crop_offsets, s.face_crop);
+    let mut cands = build_candidates(pool, grid.tile_aspect(), s.crop_offsets, s.face_crop);
+    // Keep the exact saved crops available, including projects made before a
+    // library's face metadata changed. Candidate IDs let assignment reuse its
+    // normal capacity, neighbour and statistics calculations.
+    let mut old = vec![u32::MAX; grid.tiles()];
+    if let Some((tiles, _)) = previous {
+        let key = |photo, crop: [f32; 4]| (photo, crop.map(f32::to_bits));
+        let mut ids: std::collections::HashMap<_, _> = cands.iter().enumerate().map(|(i, c)| (key(c.photo, c.crop), i as u32)).collect();
+        for (i, tile) in tiles.iter().enumerate().filter(|(_, t)| !t.is_empty()) {
+            let photo = pool.photos.get(tile.photo as usize).ok_or_else(|| anyhow::anyhow!("a source photo is no longer indexed"))?;
+            old[i] = *ids.entry(key(tile.photo, tile.crop)).or_insert_with(|| {
+                let desc = crop_descriptor(&photo.grid, tile.crop);
+                let id = cands.len() as u32;
+                cands.push(Candidate { photo: tile.photo, group: photo.group, crop: tile.crop, mean: mean_lab(&desc), desc });
+                id
+            });
+        }
+    }
     let retrieval = Retrieval::build(&cands, s.method)?;
     stats.candidates = cands.len();
     stats.build_ms = ms(t0);
     job.check()?;
-    let lists = retrieve_active(&cands, &retrieval, target, s, Some(active), job)?;
+    let selected: Vec<bool> = active.iter().enumerate().map(|(i, &a)| a && previous.and_then(|(_, only)| only).is_none_or(|only| i == only)).collect();
+    let lists = retrieve_selection(&cands, &retrieval, target, s, Some(&selected), Some(&old), job)?;
     stats.retrieval_ms = ms(t0) - stats.build_ms;
     let t1 = Instant::now();
-    let tiles = assign(pool, &cands, &retrieval, target, grid, s, active, &lists, &mut stats, job)?;
+    let tiles = assign(pool, &cands, &retrieval, target, grid, s, &selected, &lists, &old, previous, &mut stats, job)?;
     stats.assign_ms = ms(t1);
     Ok((tiles, stats))
 }
@@ -533,6 +586,10 @@ pub fn retrieve(cands: &[Candidate], r: &Retrieval, target: &Target, s: &MatchSe
 
 /// [`retrieve`] that leaves inactive tiles with an empty list.
 pub fn retrieve_active(cands: &[Candidate], r: &Retrieval, target: &Target, s: &MatchSettings, active: Option<&[bool]>, job: &Job) -> Result<Vec<Vec<(u32, f32)>>> {
+    retrieve_selection(cands, r, target, s, active, None, job)
+}
+
+fn retrieve_selection(cands: &[Candidate], r: &Retrieval, target: &Target, s: &MatchSettings, active: Option<&[bool]>, old: Option<&[u32]>, job: &Job) -> Result<Vec<Vec<(u32, f32)>>> {
     // When a tile's choice cannot depend on earlier choices (no reuse limit,
     // no penalties), only its best candidate is ever used. Keeping just that
     // one saves about 0.4 GB per million tiles.
@@ -550,7 +607,8 @@ pub fn retrieve_active(cands: &[Candidate], r: &Retrieval, target: &Target, s: &
                 if active.map(|a| !a[ci * 4096 + j]).unwrap_or(false) {
                     return Vec::new();
                 }
-                let mut v: Vec<(u32, f32)> = r.query(cands, t, k).into_iter().map(|c| (c, score(s.method, t, &cands[c as usize]))).collect();
+                let group = old.and_then(|o| cands.get(o[ci * 4096 + j] as usize)).map(|c| c.group);
+                let mut v: Vec<(u32, f32)> = r.query(cands, t, k).into_iter().filter(|&c| Some(cands[c as usize].group) != group).map(|c| (c, score(s.method, t, &cands[c as usize]))).collect();
                 v.sort_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)));
                 v.truncate(keep);
                 v.shrink_to_fit();
@@ -573,6 +631,8 @@ fn assign(
     s: &MatchSettings,
     active: &[bool],
     lists: &[Vec<(u32, f32)>],
+    old: &[u32],
+    previous: Option<(&[TileAssign], Option<usize>)>,
     stats: &mut MatchStats,
     job: &Job,
 ) -> Result<Vec<TileAssign>> {
@@ -582,6 +642,12 @@ fn assign(
     let cap = s.max_reuse.unwrap_or(u32::MAX);
     let mut uses = vec![0u32; pool.group_count as usize];
     let mut placed: Vec<u32> = vec![u32::MAX; n]; // candidate index
+    for t in 0..n {
+        if !active[t] && old[t] != u32::MAX {
+            placed[t] = old[t];
+            uses[cands[old[t] as usize].group as usize] += 1;
+        }
+    }
     let mut order: Vec<u32> = (0..n as u32).filter(|&t| active[t as usize]).collect();
     SplitMix64::new(s.seed).shuffle(&mut order);
     let radius = s.repeat_radius as i64;
@@ -597,6 +663,7 @@ fn assign(
             job.report("assigning tiles", step as u64, order.len() as u64);
         }
         let t = t as usize;
+        let old_group = (old[t] != u32::MAX).then(|| cands[old[t] as usize].group);
         neigh.clear();
         if use_neighbors {
             let (tx, ty) = ((t as i64) % cols, (t as i64) / cols);
@@ -617,6 +684,9 @@ fn assign(
         }
         let cost_of = |ci: u32, base: f32, uses: &[u32]| -> Option<f32> {
             let g = cands[ci as usize].group;
+            if Some(g) == old_group {
+                return None;
+            }
             if uses[g as usize] >= cap {
                 return None;
             }
@@ -664,7 +734,20 @@ fn assign(
                 avail = None; // force a rebuild
             }
         }
+        // A single edit must use a different photo. A whole selection may
+        // retain a tile when alternatives have exhausted their reuse limits.
+        if choice.is_none() && previous.is_some() {
+            choice = cands.iter().enumerate().filter_map(|(ci, c)| {
+                cost_of(ci as u32, score(s.method, &target.tiles[t], c), &uses).map(|cost| (ci as u32, cost))
+            }).min_by(|a, b| a.1.total_cmp(&b.1));
+            if choice.is_none() && previous.is_some_and(|(_, only)| only.is_none()) && uses[cands[old[t] as usize].group as usize] < cap {
+                choice = Some((old[t], 0.0));
+            }
+        }
         let Some((ci, _)) = choice else {
+            if previous.is_some() {
+                bail!("no different photo is available within the reuse limit; add photos or raise the maximum reuse");
+            }
             // Cannot happen after check_feasible; keep a clear error regardless.
             bail!("internal: no photo with remaining reuse capacity for tile {t}");
         };
@@ -704,7 +787,7 @@ fn assign(
         } else {
             [0.0; 3]
         };
-        out.push(TileAssign { photo: c.photo, crop: c.crop, adjust });
+        out.push(if let Some((tiles, _)) = previous.filter(|_| !active[t]) { tiles[t] } else { TileAssign { photo: c.photo, crop: c.crop, adjust } });
     }
     let mut per_group = vec![0u32; pool.group_count as usize];
     for p in placed.iter().filter(|&&p| p != u32::MAX) {
@@ -712,7 +795,7 @@ fn assign(
     }
     stats.distinct_used = per_group.iter().filter(|&&u| u > 0).count();
     stats.max_uses = per_group.iter().copied().max().unwrap_or(0);
-    let m = order.len().max(1) as f64;
+    let m = stats.tiles.max(1) as f64;
     stats.mean_delta_e = (de_sum / m) as f32;
     stats.mean_cost = (cost_sum / m) as f32;
     stats.nearby_repeats = count_nearby_repeats(&out, pool, grid.cols, 1);

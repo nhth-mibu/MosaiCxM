@@ -545,6 +545,7 @@ component ZoomView inherits Rectangle {
         root.settle();
     }
     callback tile-clicked(float, float);
+    callback tile-inspect(float, float);
     callback open-photo();
     callback show-folder();
     callback next-use();
@@ -552,6 +553,7 @@ component ZoomView inherits Rectangle {
     clip: true;
     property <float> click-u;
     property <float> click-v;
+    property <bool> primary-press;
     // The photo box goes on the side away from the clicked tile.
     property <bool> card-right;
 
@@ -683,14 +685,22 @@ component ZoomView inherits Rectangle {
         mouse-cursor: self.pressed && root.zoom > 1.001 ? MouseCursor.grabbing : root.zoom > 1.001 ? MouseCursor.grab : MouseCursor.crosshair;
         pointer-event(e) => {
             if e.kind == PointerEventKind.down {
+                root.primary-press = e.button == PointerEventButton.left;
                 root.press-cx = root.cx;
                 root.press-cy = root.cy;
+                if e.button == PointerEventButton.right {
+                    click-timer.running = false;
+                    root.card-right = self.mouse-x < root.width / 2;
+                    root.tile-inspect((self.mouse-x - root.img-x) / root.img-w, (self.mouse-y - root.img-y) / root.img-h);
+                }
             }
         }
         moved => {
-            root.cx = root.press-cx - (self.mouse-x - self.pressed-x) / root.img-w;
-            root.cy = root.press-cy - (self.mouse-y - self.pressed-y) / root.img-h;
-            root.settle();
+            if root.primary-press {
+                root.cx = root.press-cx - (self.mouse-x - self.pressed-x) / root.img-w;
+                root.cy = root.press-cy - (self.mouse-y - self.pressed-y) / root.img-h;
+                root.settle();
+            }
         }
         changed mouse-x => { root.hover((self.mouse-x - root.img-x) / root.img-w, (self.mouse-y - root.img-y) / root.img-h); }
         changed mouse-y => { root.hover((self.mouse-x - root.img-x) / root.img-w, (self.mouse-y - root.img-y) / root.img-h); }
@@ -702,7 +712,7 @@ component ZoomView inherits Rectangle {
             accept
         }
         clicked => {
-            if abs(self.mouse-x - self.pressed-x) < 4px && abs(self.mouse-y - self.pressed-y) < 4px {
+            if root.primary-press && abs(self.mouse-x - self.pressed-x) < 4px && abs(self.mouse-y - self.pressed-y) < 4px {
                 root.click-u = (self.mouse-x - root.img-x) / root.img-w;
                 root.click-v = (self.mouse-y - root.img-y) / root.img-h;
                 click-timer.running = false;
@@ -736,7 +746,7 @@ component ZoomView inherits Rectangle {
         height: 26px;
         border-radius: 7px;
         background: #00000080;
-        help := Text { text: "Scroll or double-click to look closer. Click a tile to see its photo."; color: #ffffff; font-size: 12px; }
+        help := Text { text: "Click a tile to swap its photo. Right-click for details. Scroll to zoom."; color: #ffffff; font-size: 12px; }
     }
     // The photo of the clicked tile.
     if root.info.open: Rectangle {
@@ -873,6 +883,9 @@ export component AppWindow inherits Window {
     in-out property <int> photo-count: 0;
     in-out property <int> skipped-count: 0;
     in-out property <bool> show-collections: false;
+    in-out property <int> people-filter: 0;
+    in-out property <int> colour-filter: 0;
+    in-out property <bool> skip-documents: false;
     // Folder check: shown after a folder is picked, before it is added.
     in-out property <string> check-folder;
     in-out property <string> check-summary;
@@ -997,7 +1010,7 @@ export component AppWindow inherits Window {
                 "Point at a control and wait a moment. A tooltip tells you what the control does. A small ? next to a name shows that it has a tooltip.",
                 "The app saves your work automatically. When you start the app again, it opens your last mosaic.",
                 "To look closer at the preview, scroll or double-click it. Drag it to move. Click the percentage to see the full mosaic again.",
-                "To see the photo of a tile, click the tile in the preview.",
+                "Click a tile in the preview to swap its photo. Right-click a tile to see its photo details.",
                 "To see the mosaic as people see it on the wall, click View from 1 m, 3 m or 5 m above the preview. If a red line shows that tiles look soft, make the tiles smaller.",
                 "To keep a mosaic as a file, click Save as…. To use it again, click Open….",
                 "When a new version of the app is available, a blue bar shows above the preview. Click Download to get it. To check now, click Help, then Check for updates.",
@@ -1127,14 +1140,14 @@ export component AppWindow inherits Window {
             picture: @image-url("help/find.jpg"),
             intro: "You can see the original photo of each tile. The photo index helps people find their photos on the printed mosaic.",
             steps: [
-                "Click a tile in the preview. A box shows the photo, its date and its folder.",
+                "Right-click a tile in the preview. A box shows the photo, its date and its folder.",
                 "White frames show all the tiles with this photo. A bigger frame shows the tile that you clicked.",
                 "Click Next tile to go to the next tile with this photo.",
                 "Click Open photo to open the original photo. Click Show folder to open its folder.",
                 "To close the box, click ×.",
             ],
             notes: [
-                "Double-click still zooms in. A single click shows the photo.",
+                "Double-click zooms in. A single click swaps the photo; right-click shows its details.",
                 "In step 4, tick Also save a photo index to find each photo (PDF). The app saves the index next to the mosaic.",
                 "The first page of the index is a map. The map divides the mosaic into areas. The letter is the row of areas. The number is the column of areas. A1 is at the top left.",
                 "The other pages show each photo with its date and its area, row and column. They also show the distance from the left edge and from the top edge.",
@@ -1197,11 +1210,13 @@ export component AppWindow inherits Window {
     callback style-changed(int);
     callback settings-changed();
     callback generate();
+    callback new-selection();
     callback save-project();
     callback open-project();
     callback preview-view-changed(float, float, float, length, length, length, length);
     callback preview-hover(float, float);
     callback preview-tile-clicked(float, float);
+    callback preview-tile-inspect(float, float);
     callback tile-open-photo();
     callback tile-show-folder();
     callback tile-next-use();
@@ -1407,6 +1422,32 @@ export component AppWindow inherits Window {
                                             root.toggle-collection(i, self.checked);
                                             root.changed();
                                         }
+                                    }
+                                }
+                                Field {
+                                    label: "People";
+                                    tip: "People / portraits uses photos with a detected face covering at least 2% of the picture. No people excludes photos with detected faces. Detection can miss faces.";
+                                    ComboBox {
+                                        model: ["All photos", "People / portraits", "No people"];
+                                        current-index <=> root.people-filter;
+                                        selected => { root.changed(); }
+                                    }
+                                }
+                                Field {
+                                    label: "Photo colours";
+                                    tip: "Use all photos, just colour photos, or just photos that are already black and white. Filters combine with the People setting.";
+                                    ComboBox {
+                                        model: ["All colours", "Colour only", "Black and white only"];
+                                        current-index <=> root.colour-filter;
+                                        selected => { root.changed(); }
+                                    }
+                                }
+                                Tipped {
+                                    tip: "Skip likely document pages and screenshots using filenames and image patterns. This is approximate; ordinary photos with signs or writing can still be used.";
+                                    CheckBox {
+                                        text: "Skip likely documents/screenshots";
+                                        checked <=> root.skip-documents;
+                                        toggled => { root.changed(); }
                                     }
                                 }
                             }
@@ -1821,6 +1862,14 @@ export component AppWindow inherits Window {
                             enabled: !root.busy;
                             clicked => { root.generate(); }
                         }
+                        if root.has-preview: Tipped {
+                            tip: "Choose different photos for this motif while keeping its size, style and shape.";
+                            Button {
+                                text: "New photo selection";
+                                enabled: !root.busy && !root.preview-stale;
+                                clicked => { root.new-selection(); }
+                            }
+                        }
                         if root.has-preview && root.preview-stale: Text {
                             text: "● Settings changed since this preview";
                             color: Theme.coral;
@@ -1862,6 +1911,7 @@ export component AppWindow inherits Window {
                             goto-v: root.preview-goto-v;
                             goto-n: root.preview-goto-n;
                             tile-clicked(u, v) => { root.preview-tile-clicked(u, v); }
+                            tile-inspect(u, v) => { root.preview-tile-inspect(u, v); }
                             open-photo => { root.tile-open-photo(); }
                             show-folder => { root.tile-show-folder(); }
                             next-use => { root.tile-next-use(); }

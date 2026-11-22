@@ -56,6 +56,8 @@ You don't need to do anything else. Each time you open the app, it checks your f
 - **Moved a folder or unplugged a drive?** The folder is marked "not found". Click **Find it…** and show the app where the folder is now. Nothing has to be read again.
 - **Some files skipped?** Click **why?** to see which files could not be read (for example, broken or unsupported files).
 
+Use the filters in **Photos** to restrict the small photos used in your mosaic. **People / portraits** keeps photos with a clearly detected face; **No people** excludes photos with detected faces. **Photo colours** offers **All colours**, **Colour only** and **Black and white only** (using photos that are already black and white). Filters combine, so you can choose black-and-white portraits, for example. **Skip likely documents/screenshots** excludes screenshot filenames and images with page-like patterns. Detection is approximate and can miss images or exclude a photograph by mistake; it does not exclude every photo containing writing. Everything is analysed on your computer. If too few photos remain, relax the filters, allow more reuse, or add photos.
+
 ### 2 Picture (coral)
 
 Click **Choose picture…** and pick a JPEG, PNG, WebP or TIFF image. Faces, animals and pictures with bold shapes and clear colours work best.
@@ -76,6 +78,8 @@ Not sure which picture to use? Click **Help me choose**. The app tries pictures 
 Click **Make preview**. This can take from a few seconds to a minute with very large photo collections. After the first preview, changes in **Size & style** update it automatically when you stop editing. Export becomes available when the update finishes. You can also click **Update preview** to retry.
 
 To look closer, scroll or double-click the preview, and drag to move around. When you stop, the app loads the photos you see from the original files, so each one is sharp, and shows the file name of the photo under the mouse. Use **−**, **+** and the zoom percentage (click it to see the whole mosaic again) in the corner.
+
+**Click a tile to swap its photo** for another suitable one. The other tiles and your zoom stay in place. Click **New photo selection** above the preview to choose a different mix for the whole motif. Both actions respect your photo filters and reuse limit, are autosaved, and carry through to exports. If no alternative fits the reuse limit, the app explains how to make more photos available. **Right-click a tile** to see its photo details, open the original, or find other tiles using it.
 
 Under the preview you can see how many different photos were used and how far away the mosaic looks best. Your work is saved automatically and opens again next time you start the app. Use **Save as…** at the top to keep a copy with its own name.
 

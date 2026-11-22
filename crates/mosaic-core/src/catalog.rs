@@ -137,6 +137,7 @@ CREATE TABLE IF NOT EXISTS descriptor(
   had_alpha INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS thumb(content_hash BLOB PRIMARY KEY, version INTEGER NOT NULL, jpeg BLOB NOT NULL);
 CREATE TABLE IF NOT EXISTS faces(content_hash BLOB PRIMARY KEY, version INTEGER NOT NULL, boxes BLOB NOT NULL);
+CREATE TABLE IF NOT EXISTS photo_classification(content_hash BLOB PRIMARY KEY, version INTEGER NOT NULL, document INTEGER NOT NULL);
 "#;
 
 impl Catalog {
@@ -403,6 +404,7 @@ impl Catalog {
         let n = self.conn.execute("DELETE FROM descriptor WHERE content_hash NOT IN (SELECT content_hash FROM file WHERE content_hash IS NOT NULL)", [])?;
         self.conn.execute("DELETE FROM thumb WHERE content_hash NOT IN (SELECT content_hash FROM descriptor)", [])?;
         self.conn.execute("DELETE FROM faces WHERE content_hash NOT IN (SELECT content_hash FROM descriptor)", [])?;
+        self.conn.execute("DELETE FROM photo_classification WHERE content_hash NOT IN (SELECT content_hash FROM descriptor)", [])?;
         Ok(n)
     }
 }

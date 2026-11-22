@@ -62,7 +62,7 @@ impl Pool {
         p
     }
 
-    fn assign_groups(&mut self, merge: bool) {
+    pub(crate) fn assign_groups(&mut self, merge: bool) {
         let n = self.photos.len();
         let mut group = vec![u32::MAX; n];
         let mut next = 0u32;
