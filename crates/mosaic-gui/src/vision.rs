@@ -4,7 +4,7 @@
 use anyhow::{anyhow, bail, Context, Result};
 use base64::Engine;
 use image::RgbImage;
-use mosaic_core::{decode, filters::DocumentClassifier, job::Job};
+use mosaic_core::{catalog::Catalog, decode, filters::DocumentClassifier, job::Job};
 use serde_json::{json, Value};
 use std::time::Duration;
 
@@ -90,6 +90,12 @@ impl Config {
         Ok(Self { provider, endpoint: endpoint.into(), model: model.trim().into(), key: key.trim().into() })
     }
 
+    pub fn save_preferences(&self, cat: &Catalog) -> Result<()> {
+        let settings = json!({"provider": self.provider as i32, "endpoint": self.endpoint, "model": self.model}).to_string();
+        cat.conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES('vision_preferences', ?1)", [settings])?;
+        Ok(())
+    }
+
     pub fn label(&self) -> String { format!("{} · {}", self.provider.name(), self.model) }
 
     fn url(&self) -> String {
@@ -172,6 +178,32 @@ impl Config {
     }
 }
 
+pub fn load_preferences(cat: &Catalog) -> Result<Option<(i32, String, String)>> {
+    let mut stmt = cat.conn.prepare("SELECT value FROM meta WHERE key = 'vision_preferences'")?;
+    let mut rows = stmt.query([])?;
+    if let Some(row) = rows.next()? {
+        let settings: Value = serde_json::from_str(&row.get::<_, String>(0)?)?;
+        if let (Some(provider @ 0..=4), Some(endpoint), Some(model)) = (settings["provider"].as_i64(), settings["endpoint"].as_str(), settings["model"].as_str()) {
+            return Ok(Some((provider as i32, endpoint.into(), model.into())));
+        }
+        bail!("saved AI settings are invalid; select your provider and model again");
+    }
+    let mut stmt = cat.conn.prepare("SELECT value FROM meta WHERE key = 'document_classifier'")?;
+    let mut rows = stmt.query([])?;
+    if let Some(row) = rows.next()? {
+        let key: String = row.get(0)?;
+        for i in 0..=4 {
+            let provider = Provider::from_index(i);
+            let endpoint = provider.defaults().0;
+            let prefix = format!("vision:1:{}:{endpoint}:", provider.name());
+            if let Some(model) = key.strip_prefix(&prefix).filter(|m| !m.is_empty()) {
+                return Ok(Some((i, endpoint.into(), model.into())));
+            }
+        }
+    }
+    Ok(None)
+}
+
 impl DocumentClassifier for Config {
     fn cache_key(&self) -> String { format!("vision:1:{}:{}:{}", self.provider.name(), self.endpoint, self.model) }
     fn is_document(&self, image: &RgbImage, job: &Job) -> Result<bool> { self.request(image, job, &self.url()) }
@@ -202,6 +234,25 @@ mod tests {
             request.extend_from_slice(&buf[..n]);
         }
         (headers, serde_json::from_slice(&request[header_end..header_end + length]).unwrap())
+    }
+
+    #[test]
+    fn preferences_preserve_settings_without_keys_and_recover_legacy_cloud_model() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cat = Catalog::open(tmp.path()).unwrap();
+        let config = Config::new(Provider::Jev, "", "jev-1.14.0", "fake-test-key").unwrap();
+        cat.conn.execute("INSERT INTO document_decision(content_hash, classifier, document) VALUES(zeroblob(32), ?1, 0)", [config.cache_key()]).unwrap();
+        drop(cat);
+        let cat = Catalog::open(tmp.path()).unwrap();
+        assert_eq!(load_preferences(&cat).unwrap(), Some((3, "https://api.typesafe.ai/v1".into(), "jev-1.14.0".into())));
+        let config = Config::new(Provider::Ollama, "http://localhost:2468/v1/", "gemma3:4b", "fake-test-key").unwrap();
+        config.save_preferences(&cat).unwrap();
+        drop(cat);
+        let cat = Catalog::open(tmp.path()).unwrap();
+        assert_eq!(load_preferences(&cat).unwrap(), Some((0, "http://localhost:2468/v1".into(), "gemma3:4b".into())));
+        let saved: String = cat.conn.query_row("SELECT value FROM meta WHERE key = 'vision_preferences'", [], |r| r.get(0)).unwrap();
+        assert!(!saved.contains("fake-test-key"));
+        assert_eq!(serde_json::from_str::<Value>(&saved).unwrap().as_object().unwrap().len(), 3);
     }
 
     #[test]

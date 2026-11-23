@@ -9,6 +9,7 @@ use crate::job::Job;
 use crate::pool::{Pool, PoolPhoto};
 use anyhow::{bail, Result};
 use image::RgbImage;
+use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
@@ -54,35 +55,52 @@ impl PhotoFilters {
 
     pub fn apply_with_classifier(&self, pool: &Pool, cat: &Catalog, libs: &[i64], merge: bool, classifier: Option<&dyn DocumentClassifier>, job: &Job) -> Result<Pool> {
         let screenshots = if self.skip_documents { screenshot_hashes(cat, libs)? } else { HashSet::new() };
-        let cache_key = classifier.map(|c| c.cache_key()).unwrap_or_else(|| format!("offline:{DOCUMENT_VERSION}"));
+        let offline_key = format!("offline:{DOCUMENT_VERSION}");
+        let cache_key = if self.skip_documents {
+            match classifier {
+                Some(c) => {
+                    let key = c.cache_key();
+                    cat.conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES('document_classifier', ?1)", [&key])?;
+                    key
+                }
+                None => cat.conn.query_row("SELECT value FROM meta WHERE key = 'document_classifier'", [], |r| r.get::<_, String>(0)).optional()?.unwrap_or_else(|| offline_key.clone()),
+            }
+        } else { offline_key.clone() };
         let mut photos = Vec::new();
         for (i, p) in pool.photos.iter().enumerate() {
             if classifier.is_some() || i % 128 == 0 {
                 job.check()?;
-                job.report(if classifier.is_some() { "checking photos with vision model" } else { "filtering source photos" }, i as u64, pool.photos.len() as u64);
+                job.report("filtering source photos (reusing saved checks)", i as u64, pool.photos.len() as u64);
             }
             if !self.allows(p) { continue; }
             if self.skip_documents {
                 if screenshots.contains(&p.hash) { continue; }
-                let cached = cat.conn.query_row("SELECT document FROM document_decision WHERE content_hash = ?1 AND classifier = ?2", rusqlite::params![&p.hash[..], cache_key], |r| r.get::<_, bool>(0));
-                let document = match cached {
-                    Ok(v) => v,
-                    Err(rusqlite::Error::QueryReturnedNoRows) => {
+                let cached = cached_document(cat, &p.hash, &cache_key)?.map(|v| (v, cache_key != offline_key));
+                let cached = match cached {
+                    None if classifier.is_none() && cache_key != offline_key => cached_document(cat, &p.hash, &offline_key)?.map(|v| (v, false)),
+                    v => v,
+                };
+                let (document, from_model) = match cached {
+                    Some(v) => v,
+                    None => {
                         let image = analysis_image(cat, p, libs)?;
                         job.check()?;
                         let document = match classifier {
-                            Some(c) => c.is_document(&image, job)?,
+                            Some(c) => {
+                                job.report("checking uncached photos with vision model", i as u64, pool.photos.len() as u64);
+                                c.is_document(&image, job)?
+                            }
                             None => likely_document(&image),
                         };
+                        let decision_key = if classifier.is_some() { &cache_key } else { &offline_key };
+                        cat.conn.execute("INSERT OR REPLACE INTO document_decision(content_hash, classifier, document) VALUES(?1, ?2, ?3)", rusqlite::params![&p.hash[..], decision_key, document])?;
                         job.check()?;
-                        cat.conn.execute("INSERT OR REPLACE INTO document_decision(content_hash, classifier, document) VALUES(?1, ?2, ?3)", rusqlite::params![&p.hash[..], cache_key, document])?;
-                        document
+                        (document, classifier.is_some())
                     }
-                    Err(e) => return Err(e.into()),
                 };
-                // A substantial face is evidence of a portrait, even against
-                // a plain white backdrop. Filename-marked screenshots still go.
-                if document && (classifier.is_some() || !p.faces.iter().any(|f| f.rect[2] * f.rect[3] >= 0.02)) { continue; }
+                // A saved AI decision keeps its meaning without a connection.
+                // Only offline rules allow a face to override a document result.
+                if document && (from_model || !p.faces.iter().any(|f| f.rect[2] * f.rect[3] >= 0.02)) { continue; }
             }
             photos.push(p.clone());
         }
@@ -108,6 +126,10 @@ impl PhotoFilters {
         };
         people && colour
     }
+}
+
+fn cached_document(cat: &Catalog, hash: &Hash, key: &str) -> Result<Option<bool>> {
+    Ok(cat.conn.query_row("SELECT document FROM document_decision WHERE content_hash = ?1 AND classifier = ?2", rusqlite::params![&hash[..], key], |r| r.get(0)).optional()?)
 }
 
 /// Read the upright original, then bound its size. The 96px preview thumbnail

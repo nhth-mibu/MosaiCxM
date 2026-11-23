@@ -22,6 +22,11 @@ cargo test --release               # engine tests
 
 The catalogue (index, descriptors, thumbnails) lives in the platform data folder, e.g. `~/.local/share/mosaic` on Linux. Override it with `--data-dir` or `MOSAIC_DATA_DIR`.
 
+The data folder stays the same across app versions. On macOS, it is `~/Library/Application Support/mosaic`. Keep the same data folder when you update the app. Relative `MOSAIC_DATA_DIR` paths depend on the launch folder; use an absolute path for a custom location.
+
+`catalog.sqlite` also stores face detections, offline filter results and AI judgements. Judgements use the photo content hash and classifier identity, independently of the app version. The `meta` table stores the selected classifier and the provider, endpoint and model settings. API keys are never saved. Startup restores the settings and reuses saved AI judgements without enabling a connection. Photos without a saved judgement use offline checks until the user enables model checks. If an older catalogue contains one AI classifier, startup selects its saved judgements automatically. If it contains several, enable the intended model once to select it.
+
+
 ## Releases
 
 Pushing a tag like `v0.1.0` runs `.github/workflows/release.yml` and publishes a GitHub Release with:

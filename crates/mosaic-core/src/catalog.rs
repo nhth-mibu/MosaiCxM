@@ -156,6 +156,16 @@ impl Catalog {
             let _ = conn.execute(&format!("ALTER TABLE file ADD COLUMN {col}"), []);
         }
         conn.execute("INSERT OR IGNORE INTO meta(key, value) VALUES('schema_version', '1')", [])?;
+        // Older releases saved AI decisions without saving the selected model.
+        // Reuse that model only when the existing decisions identify one model.
+        if !conn.query_row("SELECT EXISTS(SELECT 1 FROM meta WHERE key = 'document_classifier')", [], |r| r.get::<_, bool>(0))? {
+            conn.execute(
+                "INSERT OR IGNORE INTO meta(key, value)
+                 SELECT 'document_classifier', MIN(classifier) FROM document_decision
+                 WHERE classifier LIKE 'vision:%' HAVING COUNT(DISTINCT classifier) = 1",
+                [],
+            )?;
+        }
         Ok(Self { conn, path })
     }
 

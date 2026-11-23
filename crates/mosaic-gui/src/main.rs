@@ -430,7 +430,7 @@ fn disable_classifier(ui: &AppWindow, st: &Shared) {
     let was_active = s.classifier.take().is_some();
     s.pool = None;
     ui.set_model_active(false);
-    ui.set_model_status("Offline checks only. Test or enable the model after editing its settings.".into());
+    ui.set_model_status("Saved AI results are reused. Other photos use offline checks. Enable model checks to send new photos.".into());
     if was_active { mark_stale(ui); }
 }
 
@@ -1098,6 +1098,15 @@ fn scan(ui: &AppWindow, st: &Shared, id: i64) {
     });
 }
 
+fn restore_model_preferences(ui: &AppWindow, cat: &Catalog) -> Result<()> {
+    if let Some((provider, endpoint, model)) = vision::load_preferences(cat)? {
+        ui.set_model_provider(provider);
+        ui.set_model_endpoint(endpoint.into());
+        ui.set_model_name(model.into());
+    }
+    Ok(())
+}
+
 /// Model connections require an explicit action and live only in this session.
 fn connect_model_controls(ui: &AppWindow, st: &Shared) {
     {
@@ -1130,6 +1139,8 @@ fn connect_model_controls(ui: &AppWindow, st: &Shared) {
             let ui = w.unwrap();
             if ui.get_busy() { return; }
             let config = match read_classifier(&ui) { Ok(c) => c, Err(e) => return report_error(&ui, e) };
+            let saved = Catalog::open(&s.lock().unwrap().data_dir).and_then(|cat| config.save_preferences(&cat));
+            if let Err(e) = saved { return report_error(&ui, e); }
             ui.set_model_status(format!("Enabled: {}. Used when Skip likely documents/screenshots is ticked.", config.label()).into());
             {
                 let mut state = s.lock().unwrap();
@@ -1166,6 +1177,9 @@ fn main() -> Result<()> {
     {
         let mut s = st.lock().unwrap();
         if let Err(e) = refresh_libraries(&ui, &mut s) {
+            report_error(&ui, e);
+        }
+        if let Err(e) = Catalog::open(&s.data_dir).and_then(|cat| restore_model_preferences(&ui, &cat)) {
             report_error(&ui, e);
         }
         apply_style(&ui, ui.get_style_index());
@@ -1918,7 +1932,7 @@ mod tests {
         ui.window().set_size(slint::LogicalSize::new(1280.0, 1200.0));
         ui.set_model_provider(3);
         ui.set_model_name("jev-1.14.0".into());
-        ui.set_model_status("Offline checks only. Test or enable the model after editing its settings.".into());
+        ui.set_model_status("Saved AI results are reused. Other photos use offline checks. Enable model checks to send new photos.".into());
         ui.set_folders(ModelRc::new(VecModel::from(vec![FolderRow { path: "/Volumes/Photos/JPG".into(), ..Default::default() }])));
         ui.set_photo_count(65_319);
         ui.set_photos_summary("65,319 photos".into());
@@ -1961,7 +1975,8 @@ mod tests {
         use super::*;
         i_slint_backend_testing::init_no_event_loop();
         let ui = AppWindow::new().unwrap();
-        let state = Arc::new(Mutex::new(State::default()));
+        let tmp = tempfile::tempdir().unwrap();
+        let state = Arc::new(Mutex::new(State { data_dir: tmp.path().into(), ..Default::default() }));
         connect_model_controls(&ui, &state);
         assert!(!ui.get_model_active());
         assert!(state.lock().unwrap().classifier.is_none());
@@ -1988,6 +2003,15 @@ mod tests {
         let serialized = serde_json::to_string(&read_settings(&ui).unwrap().1).unwrap();
         assert!(!serialized.contains("fake-test-key"));
         assert!(!serialized.contains("api.openai.com"), "project settings must not restore a connection");
+        let restarted = AppWindow::new().unwrap();
+        let cat = Catalog::open(tmp.path()).unwrap();
+        restore_model_preferences(&restarted, &cat).unwrap();
+        assert_eq!(restarted.get_model_provider(), 4);
+        assert_eq!(restarted.get_model_name(), "gpt-6-luna");
+        assert!(restarted.get_model_api_key().is_empty());
+        assert!(!restarted.get_model_active());
+        let saved: String = cat.conn.query_row("SELECT value FROM meta WHERE key = 'vision_preferences'", [], |r| r.get(0)).unwrap();
+        assert!(!saved.contains("fake-test-key"));
         ui.invoke_disable_model();
         assert!(!ui.get_model_active());
         assert!(state.lock().unwrap().classifier.is_none());

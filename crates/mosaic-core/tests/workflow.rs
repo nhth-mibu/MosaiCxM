@@ -273,6 +273,91 @@ fn document_decisions_ignore_old_cache_and_separate_models_and_failures() {
 }
 
 #[test]
+fn saved_model_decisions_survive_reopen_without_a_connection() {
+    use mosaic_core::filters::{DocumentClassifier, PhotoFilters};
+    use std::cell::Cell;
+
+    struct Model { calls: Cell<usize> }
+    impl DocumentClassifier for Model {
+        fn cache_key(&self) -> String { "vision:1:test:server:model".into() }
+        fn is_document(&self, _: &RgbImage, _: &Job) -> anyhow::Result<bool> {
+            let call = self.calls.get();
+            self.calls.set(call + 1);
+            Ok(call == 0)
+        }
+    }
+
+    let (e, lib) = indexed_env(3);
+    let filters = PhotoFilters { people: mosaic_core::filters::People::Portraits, skip_documents: true, ..Default::default() };
+    let model = Model { calls: Cell::new(0) };
+    for p in Pool::load(&e.cat, &[lib], true).unwrap().photos {
+        e.cat.put_faces(&p.hash, &[mosaic_core::faces::Face { rect: [0.2, 0.2, 0.3, 0.3], score: 1.0 }]).unwrap();
+    }
+    let pool = Pool::load(&e.cat, &[lib], true).unwrap();
+    let kept = filters.apply_with_classifier(&pool, &e.cat, &[lib], true, Some(&model), &Job::default()).unwrap();
+    assert_eq!(kept.photos.len(), 2);
+    assert_eq!(model.calls.get(), 3);
+    let expected: Vec<_> = kept.photos.iter().map(|p| p.hash).collect();
+    let Env { _tmp, root, cat } = e;
+    drop(cat);
+
+    let cat = Catalog::open(&root.join("data")).unwrap();
+    let report = update_library(&cat, lib, &opts(), &Job::default()).unwrap();
+    assert_eq!((report.unchanged, report.decoded), (3, 0));
+    let pool = Pool::load(&cat, &[lib], true).unwrap();
+    let kept = filters.apply(&pool, &cat, &[lib], true, &Job::default()).unwrap();
+    assert_eq!(kept.photos.iter().map(|p| p.hash).collect::<Vec<_>>(), expected,
+        "restarting without an AI connection must reuse paid decisions");
+    cat.conn.execute("DELETE FROM meta WHERE key = 'document_classifier'", []).unwrap();
+    drop(cat);
+    let cat = Catalog::open(&root.join("data")).unwrap();
+    let kept = filters.apply(&pool, &cat, &[lib], true, &Job::default()).unwrap();
+    assert_eq!(kept.photos.iter().map(|p| p.hash).collect::<Vec<_>>(), expected,
+        "catalogues from older releases must recover their existing model decisions");
+    std::fs::rename(root.join("a"), root.join("disconnected")).unwrap();
+    assert_eq!(filters.apply(&pool, &cat, &[lib], true, &Job::default()).unwrap().photos.len(), 2);
+    assert_eq!(model.calls.get(), 3);
+}
+
+#[test]
+fn offline_fallback_does_not_replace_saved_model_decisions() {
+    use mosaic_core::filters::{DocumentClassifier, PhotoFilters};
+    use std::cell::Cell;
+
+    struct Model { key: &'static str, calls: Cell<usize> }
+    impl DocumentClassifier for Model {
+        fn cache_key(&self) -> String { self.key.into() }
+        fn is_document(&self, _: &RgbImage, _: &Job) -> anyhow::Result<bool> {
+            self.calls.set(self.calls.get() + 1);
+            Ok(false)
+        }
+    }
+    let (e, lib) = indexed_env(2);
+    let filters = PhotoFilters { skip_documents: true, ..Default::default() };
+    let pool = Pool::load(&e.cat, &[lib], true).unwrap();
+    let first = Model { key: "vision:1:test:server:first", calls: Cell::new(0) };
+    filters.apply_with_classifier(&pool, &e.cat, &[lib], true, Some(&first), &Job::default()).unwrap();
+    write_photos(&e.root.join("a"), 2..3);
+    update_library(&e.cat, lib, &opts(), &Job::default()).unwrap();
+    let pool = Pool::load(&e.cat, &[lib], true).unwrap();
+    let cat = Catalog::open(&e.root.join("data")).unwrap();
+    assert_eq!(filters.apply(&pool, &cat, &[lib], true, &Job::default()).unwrap().photos.len(), 3);
+    let counts: (u32, u32) = cat.conn.query_row(
+        "SELECT SUM(classifier = 'vision:1:test:server:first'), SUM(classifier LIKE 'offline:%') FROM document_decision", [], |r| Ok((r.get(0)?, r.get(1)?)),
+    ).unwrap();
+    assert_eq!(counts, (2, 1), "only the new photo needs an offline check");
+    filters.apply_with_classifier(&pool, &cat, &[lib], true, Some(&first), &Job::default()).unwrap();
+    assert_eq!(first.calls.get(), 3, "enabling the same model only checks the new photo");
+    let second = Model { key: "vision:1:test:server:second", calls: Cell::new(0) };
+    filters.apply_with_classifier(&pool, &cat, &[lib], true, Some(&second), &Job::default()).unwrap();
+    assert_eq!(second.calls.get(), 3, "another model must use its own decisions");
+    drop(cat);
+    let cat = Catalog::open(&e.root.join("data")).unwrap();
+    let selected: String = cat.conn.query_row("SELECT value FROM meta WHERE key = 'document_classifier'", [], |r| r.get(0)).unwrap();
+    assert_eq!(selected, second.key, "reopening must preserve an explicit choice among multiple models");
+}
+
+#[test]
 fn swapping_one_photo_preserves_other_tiles_and_saved_export() {
     let (e, lib) = indexed_env(24);
     let pool = Pool::load(&e.cat, &[lib], true).unwrap();

@@ -907,7 +907,7 @@ export component AppWindow inherits Window {
     in-out property <string> model-name: "gemma3:4b";
     in-out property <string> model-api-key;
     in-out property <bool> model-active: false;
-    in-out property <string> model-status: "Offline checks only. No images are sent to a model.";
+    in-out property <string> model-status: "Saved AI results are reused. Other photos use offline checks. No images are sent.";
     // Folder check: shown after a folder is picked, before it is added.
     in-out property <string> check-folder;
     in-out property <string> check-summary;
@@ -1550,7 +1550,7 @@ export component AppWindow inherits Window {
                                                 model-status-text := Text { text: root.model-status; color: Theme.fg; font-size: 11px; wrap: word-wrap; min-height: self.preferred-height; }
                                             }
                                         }
-                                        Text { text: "Results are cached. The first pass through a large collection can take a while."; color: Theme.muted; font-size: 11px; wrap: word-wrap; min-height: self.preferred-height; }
+                                        Text { text: "Results survive restarts and updates. Saved results need no tokens. Enable model checks to check new photos."; color: Theme.muted; font-size: 11px; wrap: word-wrap; min-height: self.preferred-height; }
                                     }
                                 }
                             }
