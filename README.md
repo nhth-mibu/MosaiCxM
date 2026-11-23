@@ -99,9 +99,9 @@ Want more control? Open **Advanced** for the grid, how often each photo may be u
 ### 4 Export (violet)
 
 - **Image file:** one big image file for a print shop. The app shows the size in pixels and the file size before you export.
-- **Print pages (PDF):** the mosaic cut into pages for your own printer. Choose the paper (A4, A3, Letter…) and the app shows how many pages you will get.
+- **Print pages (PDF):** the mosaic cut into pages for your own printer. Choose the paper (A4, A3, Letter…) and the app shows how many pages you will get. By default, it chooses the orientation with fewer print sheets.
 
-For Canon SELPHY CP printers, choose **SELPHY Postcard (100×148 mm)**, **SELPHY L (89×119 mm)**, or **SELPHY Card (54×86 mm)**. These are the [finished photo sizes specified by Canon](https://cam.start.canon/en/P001/manual/html/UG-07_Reference_0070.html), after removing the perforated ends. Use **Landscape** to turn the paper. L and Card sizes need the matching cassette or adapter.
+For Canon SELPHY CP printers, choose **SELPHY Postcard (100×148 mm)**, **SELPHY L (89×119 mm)**, or **SELPHY Card (54×86 mm)**. These are the [finished photo sizes specified by Canon](https://cam.start.canon/en/P001/manual/html/UG-07_Reference_0070.html), after removing the perforated ends. To set the orientation yourself, clear **Choose orientation with fewer pages**, then use **Landscape**. L and Card sizes need the matching cassette or adapter.
 
 Tick **Also save a list of the photos used** if you want a list of every photo in the mosaic.
 

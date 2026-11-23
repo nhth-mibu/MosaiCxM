@@ -83,6 +83,19 @@ impl PdfPlan {
     }
 }
 
+/// Choose the orientation with fewer printed sheets. Keep the current orientation on a tie.
+pub fn plan_pdf_auto_orientation(project: &Project, print: &PrintSettings) -> Result<PdfPlan> {
+    let mut rotated = print.clone();
+    rotated.landscape = !rotated.landscape;
+    match (plan_pdf(project, print), plan_pdf(project, &rotated)) {
+        (Ok(current), Ok(other)) => {
+            if other.printed_pages() < current.printed_pages() { Ok(other) } else { Ok(current) }
+        }
+        (Ok(plan), Err(_)) | (Err(_), Ok(plan)) => Ok(plan),
+        (Err(error), Err(_)) => Err(error),
+    }
+}
+
 pub fn plan_pdf(project: &Project, print: &PrintSettings) -> Result<PdfPlan> {
     let g = &project.grid;
     let layout = compute_layout(g.width_mm, g.height_mm, print)?;

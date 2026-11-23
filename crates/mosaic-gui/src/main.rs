@@ -18,7 +18,7 @@ use mosaic_core::indexer::{update_library, walk_images, IndexOptions, IMAGE_EXTE
 use mosaic_core::job::{is_cancelled, Job};
 use mosaic_core::layout::{PrintSettings, PAPERS};
 use mosaic_core::matching::{GridSpec, MatchError, MatchSettings, Method};
-use mosaic_core::pdf::{export_pdf, plan_pdf};
+use mosaic_core::pdf::{export_pdf, plan_pdf, plan_pdf_auto_orientation, PdfPlan};
 use mosaic_core::photo_index::{friendly_date, write_index_pdf, TilePlace};
 use mosaic_core::pool::Pool;
 use mosaic_core::message::{letter_tiles, HiddenMessage, Tone, MIN_LETTER_TILES};
@@ -460,6 +460,11 @@ fn print_settings(ui: &AppWindow) -> Result<PrintSettings> {
     Ok(ps)
 }
 
+fn print_plan(ui: &AppWindow, project: &Project) -> Result<PdfPlan> {
+    let ps = print_settings(ui)?;
+    if ui.get_auto_orientation() { plan_pdf_auto_orientation(project, &ps) } else { plan_pdf(project, &ps) }
+}
+
 fn raster_format(ui: &AppWindow) -> RasterFormat {
     [RasterFormat::Tiff, RasterFormat::Png, RasterFormat::Jpeg][ui.get_raster_format_index().clamp(0, 2) as usize]
 }
@@ -568,7 +573,7 @@ fn update_export_summary(ui: &AppWindow, st: &State) {
             )
         })
     } else {
-        print_settings(ui).and_then(|ps| plan_pdf(&p, &ps)).map(|pl| {
+        print_plan(ui, &p).map(|pl| {
             format!(
                 "{} pages ({} across × {} down{}) on {} {}, plus 1 A4 assembly page\nFile size about {}",
                 pl.printed_pages(),
@@ -1702,7 +1707,7 @@ fn main() -> Result<()> {
                     }))
                 });
             } else {
-                let plan = match print_settings(&ui).and_then(|ps| plan_pdf(&p, &ps)) {
+                let plan = match print_plan(&ui, &p) {
                     Ok(pl) => pl,
                     Err(e) => return report_error(&ui, e),
                 };
@@ -2088,6 +2093,61 @@ mod tests {
         assert_eq!(print.sheet_mm(), (100.0, 150.0), "Custom must still select the entered size after adding presets");
         let button = i_slint_backend_testing::ElementHandle::find_by_accessible_label(&ui, "Export PDF…").next().unwrap();
         assert_eq!(button.accessible_enabled(), Some(true), "paper changes do not require another preview");
+    }
+
+    #[test]
+    fn pdf_orientation_is_automatic_by_default_and_can_be_overridden() {
+        use super::*;
+        use mosaic_core::project::{MotifRef, SourceRef};
+        use mosaic_core::matching::TileAssign;
+
+        i_slint_backend_testing::init_no_event_loop();
+        let ui = AppWindow::new().unwrap();
+        ui.set_paper_formats(paper_formats());
+        ui.set_paper_index(PAPERS.iter().position(|p| p.name == "SELPHY Postcard").unwrap() as i32);
+        ui.set_margin_mm("0".into());
+        ui.set_overlap_mm("0".into());
+        ui.set_marks(false);
+        let hash = "00".repeat(32);
+        let mut project = Project {
+            format: mosaic_core::project::PROJECT_FORMAT,
+            app_version: "test".into(),
+            motif: MotifRef { path: "motif.jpg".into(), content_hash: hash.clone(), width: 12000, height: 7200, crop: [0.0, 0.0, 1.0, 1.0] },
+            libraries: vec![],
+            grid: GridSpec::new(1000.0, 600.0, 1, 1).unwrap(),
+            settings: MatchSettings::for_method(Method::Classic),
+            descriptor_version: mosaic_core::descriptor::DESCRIPTOR_VERSION,
+            sources: vec![SourceRef { hash, width: 12000, height: 7200 }],
+            tiles: vec![TileAssign { photo: 0, crop: [0.0, 0.0, 1.0, 1.0], adjust: [0.0; 3] }],
+            target_cells: String::new(),
+            stats: Default::default(),
+            outline: None,
+        };
+        assert!(ui.get_auto_orientation());
+        let plan = print_plan(&ui, &project).unwrap();
+        assert!(plan.print.landscape);
+        assert_eq!(plan.printed_pages(), 42);
+        let mut state = State { project: Some(Arc::new(project.clone())), ..Default::default() };
+        update_export_summary(&ui, &state);
+        assert!(ui.get_export_summary().contains("42 pages (7 across × 6 down) on SELPHY Postcard landscape"));
+
+        ui.set_auto_orientation(false);
+        for (landscape, pages) in [(false, 50), (true, 42)] {
+            ui.set_landscape(landscape);
+            let plan = print_plan(&ui, &project).unwrap();
+            assert_eq!(plan.print.landscape, landscape);
+            assert_eq!(plan.printed_pages(), pages);
+            update_export_summary(&ui, &state);
+            assert!(ui.get_export_summary().starts_with(&format!("{pages} pages")));
+        }
+        ui.set_auto_orientation(true);
+        project.grid = GridSpec::new(600.0, 1000.0, 1, 1).unwrap();
+        let plan = print_plan(&ui, &project).unwrap();
+        assert!(!plan.print.landscape);
+        assert_eq!(plan.printed_pages(), 42);
+        state.project = Some(Arc::new(project));
+        update_export_summary(&ui, &state);
+        assert!(ui.get_export_summary().contains("SELPHY Postcard portrait"));
     }
 
     #[test]

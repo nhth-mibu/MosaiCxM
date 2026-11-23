@@ -994,6 +994,7 @@ export component AppWindow inherits Window {
     in-out property <int> paper-index: 1;
     in-out property <string> custom-w: "600";
     in-out property <string> custom-h: "900";
+    in-out property <bool> auto-orientation: true;
     in-out property <bool> landscape: false;
     in-out property <string> margin-mm: "6";
     in-out property <string> overlap-mm: "10";
@@ -1108,7 +1109,7 @@ export component AppWindow inherits Window {
             steps: [
                 "Select Image file or Print pages (PDF).",
                 "For an image file, select the format and the print quality.",
-                "For print pages, select the paper size. If you want wide pages, select Landscape.",
+                "For print pages, select the paper size. The app chooses the orientation with fewer sheets.",
                 "Click Export image… or Export PDF…, and select where to save the file.",
                 "Wait until the status bar shows that the export is done.",
             ],
@@ -1793,7 +1794,8 @@ export component AppWindow inherits Window {
                                         LineEdit { text <=> root.custom-w; edited => { root.export-settings-changed(); } }
                                         LineEdit { text <=> root.custom-h; edited => { root.export-settings-changed(); } }
                                     }
-                                    TipCheck { text: "Landscape"; tip: "Turn the pages so that they are wider than they are tall."; checked <=> root.landscape; toggled => { root.export-settings-changed(); } }
+                                    TipCheck { text: "Choose orientation with fewer pages"; tip: "Compare portrait and landscape with your print settings. Use the orientation that needs fewer sheets."; checked <=> root.auto-orientation; toggled => { root.export-settings-changed(); } }
+                                    if !root.auto-orientation: TipCheck { text: "Landscape"; tip: "Turn the pages so that they are wider than they are tall."; checked <=> root.landscape; toggled => { root.export-settings-changed(); } }
                                     AdvancedPanel {
                                         text: "margins, overlap, DPI, marks";
                                         expanded: root.export-advanced;

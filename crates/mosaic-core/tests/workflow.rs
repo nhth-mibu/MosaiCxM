@@ -7,7 +7,7 @@ use mosaic_core::indexer::{update_library, IndexOptions};
 use mosaic_core::job::{is_cancelled, Job};
 use mosaic_core::layout::{paper_by_name, PrintSettings};
 use mosaic_core::matching::{GridSpec, MatchError, MatchSettings, Method, Target};
-use mosaic_core::pdf::{export_pdf, plan_pdf};
+use mosaic_core::pdf::{export_pdf, plan_pdf, plan_pdf_auto_orientation};
 use mosaic_core::pool::Pool;
 use mosaic_core::project::{check_sources, libraries_refs, load_target, ProblemKind, Project};
 use mosaic_core::recommend::{recommend, MotifCandidate, RecommendOptions};
@@ -458,6 +458,54 @@ fn cancelled_and_failed_exports_leave_nothing() {
     assert!(bytes.starts_with(b"%PDF-1.4") && bytes.ends_with(b"%%EOF\n"));
     let pages = bytes.windows(12).filter(|w| w == b"/Type /Page ").count();
     assert_eq!(pages, pplan.layout.pages.len() + 1);
+}
+
+#[test]
+fn pdf_auto_orientation_uses_fewer_printed_sheets() {
+    let (e, a) = indexed_env(6);
+    let mut p = make_project(&e, &[a], MatchSettings::for_method(Method::Classic), 3, 2);
+    let mut ps = PrintSettings::new(paper_by_name("SELPHY Postcard").unwrap());
+    ps.margins_mm = [0.0; 4];
+    ps.overlap_mm = 0.0;
+    ps.marks = false;
+    for (w, h, landscape, pages) in [(1000.0, 600.0, true, 42), (600.0, 1000.0, false, 42)] {
+        p.grid.width_mm = w;
+        p.grid.height_mm = h;
+        let plan = plan_pdf_auto_orientation(&p, &ps).unwrap();
+        assert_eq!(plan.print.landscape, landscape);
+        assert_eq!(plan.printed_pages(), pages);
+        assert_eq!((plan.layout.art_w, plan.layout.art_h), (w, h));
+        assert_eq!((plan.spec.width_mm, plan.spec.height_mm), (w, h));
+    }
+    p.grid = GridSpec::new(1000.0, 600.0, 10, 6).unwrap();
+    p.outline = Some(mosaic_core::shape::Outline::new(mosaic_core::shape::Shape::Ellipse));
+    let tile = p.tiles[0];
+    p.tiles = vec![mosaic_core::matching::TileAssign::EMPTY; 60];
+    p.tiles[0] = tile;
+    let plan = plan_pdf_auto_orientation(&p, &ps).unwrap();
+    assert!(!plan.print.landscape, "both orientations print one sheet after blank sheets are skipped");
+    assert_eq!(plan.printed_pages(), 1);
+    assert_eq!(plan.layout.pages.len(), 50);
+    p.outline = None;
+    p.tiles.fill(tile);
+    p.grid.width_mm = 80.0;
+    p.grid.height_mm = 80.0;
+    for landscape in [false, true] {
+        ps.landscape = landscape;
+        let plan = plan_pdf_auto_orientation(&p, &ps).unwrap();
+        assert_eq!(plan.print.landscape, landscape);
+        assert_eq!(plan.printed_pages(), 1);
+    }
+    ps.landscape = false;
+    ps.margins_mm = [0.0, 60.0, 0.0, 60.0];
+    assert!(plan_pdf(&p, &ps).is_err());
+    assert!(plan_pdf_auto_orientation(&p, &ps).unwrap().print.landscape);
+    ps.landscape = true;
+    ps.margins_mm = [60.0, 0.0, 60.0, 0.0];
+    assert!(plan_pdf(&p, &ps).is_err());
+    assert!(!plan_pdf_auto_orientation(&p, &ps).unwrap().print.landscape);
+    ps.margins_mm = [80.0; 4];
+    assert!(plan_pdf_auto_orientation(&p, &ps).is_err());
 }
 
 #[test]
