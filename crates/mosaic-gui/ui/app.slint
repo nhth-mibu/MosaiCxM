@@ -82,6 +82,7 @@ export struct TileInfo {
     distance: string,
     has-file: bool,
     more: bool,
+    pinned: bool,
 }
 
 global Theme {
@@ -570,6 +571,8 @@ component ZoomView inherits Rectangle {
     callback open-photo();
     callback show-folder();
     callback next-use();
+    callback toggle-pin();
+    callback exclude-photo();
     callback close-info();
     clip: true;
     property <float> click-u;
@@ -821,6 +824,22 @@ component ZoomView inherits Rectangle {
                 OverlayButton { text: "Show folder"; tip: "Open the folder that has this photo."; enabled: root.info.has-file; clicked => { root.show-folder(); } }
                 if root.info.more: OverlayButton { text: "Next tile"; tip: "Go to the next tile that shows this photo."; clicked => { root.next-use(); } }
             }
+            HorizontalLayout {
+                padding-top: 4px;
+                spacing: 6px;
+                alignment: start;
+                OverlayButton {
+                    text: root.info.pinned ? "Unpin tile" : "Pin tile";
+                    active: root.info.pinned;
+                    tip: "Lock this tile so New photo selection and clicks keep this photo here.";
+                    clicked => { root.toggle-pin(); }
+                }
+                OverlayButton {
+                    text: "Exclude photo";
+                    tip: "Remove this photo from this mosaic and replace all tiles showing it.";
+                    clicked => { root.exclude-photo(); }
+                }
+            }
         }
     }
     // View from 1 m, 3 m, 5 m.
@@ -941,6 +960,11 @@ export component AppWindow inherits Window {
     in-out property <string> motif-name;
     in-out property <image> motif-image;
     in-out property <float> motif-aspect: 0; // width / height of the chosen picture, 0 = none
+    in-out property <float> motif-zoom: 1.0;
+    in-out property <float> motif-pan-x: 0.5;
+    in-out property <float> motif-pan-y: 0.5;
+    in-out property <[float]> motif-crop-rect: [0, 0, 1, 1];
+    in-out property <bool> show-motif-crop: false;
     in-out property <string> suggest-folder;
     in-out property <int> suggest-from-library: 30;
     in-out property <[SuggestionRow]> suggestions;
@@ -964,6 +988,9 @@ export component AppWindow inherits Window {
     in-out property <float> usage-penalty: 0;
     in-out property <bool> crop-offsets: false;
     in-out property <bool> face-crop: true;
+    in-out property <bool> focal-priority: false;
+    in-out property <int> excluded-photo-count: 0;
+    in-out property <int> pinned-tile-count: 0;
     in-out property <int> seed: 1;
     in-out property <float> color-correction: 0;
     in-out property <float> motif-blend: 0;
@@ -1253,6 +1280,7 @@ export component AppWindow inherits Window {
     callback test-model();
 
     callback browse-motif();
+    callback reset-motif-crop();
     callback swap-size();
     callback browse-shape() -> bool;
     callback browse-suggest-folder();
@@ -1272,6 +1300,9 @@ export component AppWindow inherits Window {
     callback tile-open-photo();
     callback tile-show-folder();
     callback tile-next-use();
+    callback tile-toggle-pin();
+    callback tile-exclude-photo();
+    callback clear-excluded-photos();
     callback tile-close();
 
     callback export-settings-changed();
@@ -1693,11 +1724,77 @@ export component AppWindow inherits Window {
                             }
                             if root.open-step == 2: VerticalLayout {
                                 spacing: 8px;
-                                if root.motif-path != "": Rectangle {
+                                if root.motif-path != "": motif-box := Rectangle {
                                     height: 150px;
                                     border-radius: 8px;
                                     background: Theme.bg;
-                                    Image { source: root.motif-image; image-fit: contain; width: parent.width - 8px; height: parent.height - 8px; }
+                                    clip: true;
+                                    property <length> box-w: self.width - 8px;
+                                    property <length> box-h: self.height - 8px;
+                                    property <float> ma: root.motif-aspect > 0 ? root.motif-aspect : 1.0;
+                                    property <length> img-w: min(self.box-w, self.box-h * self.ma);
+                                    property <length> img-h: self.img-w / self.ma;
+                                    property <length> img-x: (self.width - self.img-w) / 2;
+                                    property <length> img-y: (self.height - self.img-h) / 2;
+                                    Image {
+                                        source: root.motif-image;
+                                        image-fit: fill;
+                                        x: motif-box.img-x;
+                                        y: motif-box.img-y;
+                                        width: motif-box.img-w;
+                                        height: motif-box.img-h;
+                                    }
+                                    if root.motif-crop-rect.length == 4: Rectangle {
+                                        x: motif-box.img-x + root.motif-crop-rect[0] * motif-box.img-w;
+                                        y: motif-box.img-y + root.motif-crop-rect[1] * motif-box.img-h;
+                                        width: root.motif-crop-rect[2] * motif-box.img-w;
+                                        height: root.motif-crop-rect[3] * motif-box.img-h;
+                                        border-width: 2px;
+                                        border-color: Theme.coral;
+                                        background: transparent;
+                                    }
+                                }
+                                if root.motif-path != "": LinkButton {
+                                    text: (root.show-motif-crop ? "▾" : "▸") + " Frame & crop picture"
+                                        + (root.motif-zoom > 1.01 ? " (" + round(root.motif-zoom * 10) / 10 + "×)" : "");
+                                    clicked => { root.show-motif-crop = !root.show-motif-crop; }
+                                }
+                                if root.motif-path != "" && root.show-motif-crop: Rectangle {
+                                    background: Theme.surface;
+                                    border-color: Theme.line;
+                                    border-width: 1px;
+                                    border-radius: 8px;
+                                    min-height: crop-form.preferred-height;
+                                    crop-form := VerticalLayout {
+                                        padding: 10px;
+                                        spacing: 6px;
+                                        Field {
+                                            label: "Zoom";
+                                            tip: "Zoom in on the main subject of your picture before turning it into tiles.";
+                                            Slider { minimum: 1.0; maximum: 4.0; value <=> root.motif-zoom; changed => { root.changed(); } }
+                                            Text { text: round(root.motif-zoom * 10) / 10 + "×"; min-width: 36px; color: Theme.fg; vertical-alignment: center; }
+                                        }
+                                        Field {
+                                            label: "Pan X";
+                                            tip: "Shift the crop window horizontally across the picture.";
+                                            Slider { minimum: 0.0; maximum: 1.0; value <=> root.motif-pan-x; changed => { root.changed(); } }
+                                            Text { text: round(root.motif-pan-x * 100) + "%"; min-width: 36px; color: Theme.fg; vertical-alignment: center; }
+                                        }
+                                        Field {
+                                            label: "Pan Y";
+                                            tip: "Shift the crop window vertically across the picture.";
+                                            Slider { minimum: 0.0; maximum: 1.0; value <=> root.motif-pan-y; changed => { root.changed(); } }
+                                            Text { text: round(root.motif-pan-y * 100) + "%"; min-width: 36px; color: Theme.fg; vertical-alignment: center; }
+                                        }
+                                        HorizontalLayout {
+                                            alignment: start;
+                                            LinkButton {
+                                                text: "Reset crop";
+                                                enabled: !root.busy;
+                                                clicked => { root.reset-motif-crop(); }
+                                            }
+                                        }
+                                    }
                                 }
                                 HorizontalLayout {
                                     spacing: 10px;
@@ -1851,6 +1948,18 @@ export component AppWindow inherits Window {
                                         }
                                         TipCheck { text: "Try off-centre crops"; tip: "The app also tries to cut each photo away from its centre, if this gives a better match. This is slower."; checked <=> root.crop-offsets; toggled => { root.changed(); } }
                                         TipCheck { text: "Keep faces in frame"; tip: "The app finds faces in your photos when it scans them. It cuts each photo so that the faces stay whole in the tile. Photos without faces keep their top part if they are tall."; checked <=> root.face-crop; toggled => { root.changed(); } }
+                                        TipCheck { text: "Prioritise faces & detail"; tip: "Match tiles covering faces and sharp edges in your picture first so key details get the best photos before reuse limits fill up."; checked <=> root.focal-priority; toggled => { root.changed(); } }
+                                        if root.excluded-photo-count > 0: HorizontalLayout {
+                                            spacing: 8px;
+                                            alignment: start;
+                                            Text { text: root.excluded-photo-count + " photo(s) excluded from this mosaic"; color: Theme.muted; font-size: 11px; vertical-alignment: center; }
+                                            LinkButton {
+                                                text: "Clear";
+                                                vertical-alignment: center;
+                                                enabled: !root.busy;
+                                                clicked => { root.clear-excluded-photos(); }
+                                            }
+                                        }
                                         if root.shape-index > 0: Field {
                                             label: "Edge tiles";
                                             tip: "Tiles on the edge of the shape. A tile is used only if this much of it is inside the shape.";
@@ -2143,6 +2252,8 @@ export component AppWindow inherits Window {
                             open-photo => { root.tile-open-photo(); }
                             show-folder => { root.tile-show-folder(); }
                             next-use => { root.tile-next-use(); }
+                            toggle-pin => { root.tile-toggle-pin(); }
+                            exclude-photo => { root.tile-exclude-photo(); }
                             close-info => { root.tile-close(); }
                         }
                         if !root.has-preview: VerticalLayout {

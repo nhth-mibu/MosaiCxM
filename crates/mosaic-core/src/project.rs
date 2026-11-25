@@ -9,7 +9,7 @@ use crate::decode;
 use crate::descriptor::{CELLS, DESCRIPTOR_VERSION};
 use crate::job::Job;
 use crate::matching::{GridSpec, MatchError, MatchSettings, MatchStats, Target, TileAssign};
-use crate::matching::{match_tiles_masked, reselect_tiles};
+use crate::matching::{match_tiles_masked, reselect_tiles, reselect_tiles_subset};
 use crate::pool::Pool;
 use crate::shape::Outline;
 use anyhow::{anyhow, bail, Context, Result};
@@ -64,12 +64,17 @@ pub struct Project {
     pub outline: Option<Outline>,
 }
 
-/// Load the motif and sample it for the grid.
+/// Load the motif and sample it for the grid (centred cover fit).
 pub fn load_target(motif: &Path, grid: &GridSpec) -> Result<(Target, MotifRef)> {
+    load_target_with_crop(motif, grid, 1.0, [0.5, 0.5])
+}
+
+/// Load the motif and sample it for the grid with custom zoom (`1..=5`) and pan (`[0..=1, 0..=1]`).
+pub fn load_target_with_crop(motif: &Path, grid: &GridSpec, zoom: f32, pan: [f32; 2]) -> Result<(Target, MotifRef)> {
     let bytes = std::fs::read(motif).with_context(|| format!("cannot read motif {}", motif.display()))?;
-    let need = (grid.cols.max(grid.rows) as usize * CELLS * 2) as u32;
+    let need = ((grid.cols.max(grid.rows) as usize * CELLS * 2) as f32 * zoom.clamp(1.0, 5.0)).round() as u32;
     let d = decode::decode_bytes(&bytes, Some(need)).with_context(|| format!("cannot decode motif {}", motif.display()))?;
-    let (target, crop) = Target::from_image(&d.image, grid);
+    let (target, crop) = Target::from_image_cropped(&d.image, grid, zoom, pan);
     let mref = MotifRef {
         path: std::fs::canonicalize(motif).unwrap_or_else(|_| motif.to_path_buf()),
         content_hash: hex(blake3::hash(&bytes).as_bytes()),
@@ -119,6 +124,57 @@ impl Project {
         };
         let (tiles, stats) = match_tiles_masked(pool, target, &grid, &settings, active.as_deref(), job)?;
         Ok(Self::from_assignments(pool, motif, libraries, grid, settings, outline, &target.cells(), tiles, stats))
+    }
+
+    /// Whether row-major `tile` is pinned against swaps and reselections.
+    pub fn is_pinned(&self, tile: usize) -> bool {
+        self.settings.pinned_tiles.contains(&(tile as u32))
+    }
+
+    /// Toggle pin state on a non-empty tile. Returns the new pinned state.
+    pub fn toggle_pin(&mut self, tile: usize) -> bool {
+        if self.tiles.get(tile).is_none_or(TileAssign::is_empty) {
+            return false;
+        }
+        let idx = tile as u32;
+        if let Some(pos) = self.settings.pinned_tiles.iter().position(|&t| t == idx) {
+            self.settings.pinned_tiles.remove(pos);
+            false
+        } else {
+            self.settings.pinned_tiles.push(idx);
+            self.settings.pinned_tiles.sort_unstable();
+            self.settings.pinned_tiles.dedup();
+            true
+        }
+    }
+
+    /// Exclude `source_idx` from this mosaic and smoothly replace only the tiles
+    /// that currently display it, keeping all other tiles untouched.
+    pub fn exclude_photo(&self, pool: &Pool, source_idx: usize, job: &Job) -> Result<Project> {
+        job.check()?;
+        let src = self.sources.get(source_idx).ok_or_else(|| anyhow!("unknown source photo index"))?;
+        let by_hash: HashMap<_, _> = pool.photos.iter().enumerate().map(|(i, p)| (hex(&p.hash), i as u32)).collect();
+        let source_ids: Vec<u32> = self.sources.iter().map(|s| by_hash.get(&s.hash).copied().ok_or_else(|| anyhow!("a source photo is no longer indexed; update the preview first"))).collect::<Result<_>>()?;
+        let previous: Vec<_> = self.tiles.iter().map(|t| {
+            let mut t = *t;
+            if !t.is_empty() { t.photo = source_ids[t.photo as usize]; }
+            t
+        }).collect();
+        let mut settings = self.settings.clone();
+        if !settings.excluded_photos.contains(&src.hash) {
+            settings.excluded_photos.push(src.hash.clone());
+        }
+        settings.must_include.retain(|h| h != &src.hash);
+        let replace: Vec<bool> = self.tiles.iter().map(|t| !t.is_empty() && t.photo as usize == source_idx).collect();
+        settings.pinned_tiles.retain(|&idx| !replace.get(idx as usize).copied().unwrap_or(false));
+        let cells = self.target_cells()?;
+        let target = Target::from_cells(self.grid.cols, self.grid.rows, &cells);
+        let (tiles, stats) = reselect_tiles_subset(pool, &target, &self.grid, &settings, &previous, &replace, false, job)
+            .map_err(|e| match e { MatchError::Other(e) => e, e => anyhow::Error::new(e) })?;
+        job.check()?;
+        let mut p = Self::from_assignments(pool, self.motif.clone(), self.libraries.clone(), self.grid, settings, self.outline.clone(), &cells, tiles, stats);
+        p.target_cells = self.target_cells.clone();
+        Ok(p)
     }
 
     /// Replace one tile, or choose a fresh selection for the entire motif.

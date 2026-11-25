@@ -13,7 +13,7 @@ use mosaic_core::matching::{GridSpec, MatchError, MatchSettings, Method};
 use mosaic_core::pdf::{export_pdf, plan_pdf};
 use mosaic_core::pool::Pool;
 use mosaic_core::message::{HiddenMessage, Tone};
-use mosaic_core::project::{check_sources, libraries_refs, load_target, write_manifest, write_output_stats, OutputStats, Project};
+use mosaic_core::project::{check_sources, libraries_refs, load_target_with_crop, write_manifest, write_output_stats, OutputStats, Project};
 use mosaic_core::render::{render_preview, FileSource};
 use mosaic_core::shape::{Outline, Shape};
 use mosaic_core::units::format_bytes;
@@ -173,6 +173,21 @@ pub struct MatchArgs {
     /// Guarantee that these photo files (repeatable) appear at least once in the mosaic.
     #[arg(long)]
     pub must_include: Vec<PathBuf>,
+    /// Exclude these photo files (repeatable) from the mosaic.
+    #[arg(long)]
+    pub exclude: Vec<PathBuf>,
+    /// Zoom into the motif before cropping (1.0 = full fit, up to 5.0).
+    #[arg(long, default_value_t = 1.0)]
+    pub motif_zoom: f32,
+    /// Horizontal motif crop pan, 0.0 (left) to 1.0 (right).
+    #[arg(long, default_value_t = 0.5)]
+    pub motif_pan_x: f32,
+    /// Vertical motif crop pan, 0.0 (top) to 1.0 (bottom).
+    #[arg(long, default_value_t = 0.5)]
+    pub motif_pan_y: f32,
+    /// Match tiles covering motif faces and high-detail edges before flat regions.
+    #[arg(long)]
+    pub focal_priority: bool,
 }
 
 #[derive(Args)]
@@ -395,6 +410,16 @@ pub fn settings_from(m: &MatchArgs) -> Result<(GridSpec, MatchSettings)> {
             s.must_include.push(hx);
         }
     }
+    for p in &m.exclude {
+        let h = hash_file(p).with_context(|| format!("--exclude {}", p.display()))?;
+        let hx = hex(&h);
+        if !s.excluded_photos.contains(&hx) {
+            s.excluded_photos.push(hx);
+        }
+    }
+    s.motif_zoom = m.motif_zoom;
+    s.motif_pan = [m.motif_pan_x, m.motif_pan_y];
+    s.focal_priority = m.focal_priority;
     s.validate()?;
     Ok((grid, s))
 }
@@ -424,7 +449,7 @@ fn run(cli: Cli, cancel: Arc<AtomicBool>) -> Result<()> {
                 settings.photo_filters.apply(&pool, &cat, &libs, settings.merge_near_duplicates, &job)?
             };
             let load_ms = t.elapsed().as_millis();
-            let (target, motif) = load_target(&a.motif, &grid)?;
+            let (target, motif) = load_target_with_crop(&a.motif, &grid, settings.motif_zoom, settings.motif_pan)?;
             let outline = match &a.shape {
                 Some(name) => {
                     let shape = if name.eq_ignore_ascii_case("motif") {
