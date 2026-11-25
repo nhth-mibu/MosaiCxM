@@ -4,6 +4,7 @@
 use anyhow::{bail, Context, Result};
 use std::fs::File;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 pub struct TempOutput {
     final_path: PathBuf,
@@ -13,6 +14,18 @@ pub struct TempOutput {
 }
 
 pub const TEMP_MARKER: &str = ".mosaic-partial-";
+static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+fn bounded_prefix(name: &str, max_bytes: usize) -> &str {
+    let mut end = 0;
+    for (i, c) in name.char_indices() {
+        if i + c.len_utf8() > max_bytes {
+            break;
+        }
+        end = i + c.len_utf8();
+    }
+    if end == 0 { "output" } else { &name[..end] }
+}
 
 impl TempOutput {
     pub fn create(final_path: &Path) -> Result<Self> {
@@ -23,9 +36,10 @@ impl TempOutput {
         if !dir.is_dir() {
             bail!("output folder does not exist: {}", dir.display());
         }
-        let name = final_path.file_name().and_then(|n| n.to_str()).unwrap_or("output");
+        let name = bounded_prefix(final_path.file_name().and_then(|n| n.to_str()).unwrap_or("output"), 120);
         let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
-        let temp_path = dir.join(format!(".{name}{TEMP_MARKER}{}-{nonce}", std::process::id()));
+        let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
+        let temp_path = dir.join(format!(".{name}{TEMP_MARKER}{}-{nonce}-{seq}", std::process::id()));
         let file = std::fs::OpenOptions::new()
             .write(true)
             .read(true)

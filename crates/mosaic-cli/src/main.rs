@@ -576,7 +576,11 @@ fn resolve_files(cat: &Catalog, p: &Project, job: &Job) -> Result<FileSource> {
 
 pub fn save_png(img: &image::RgbImage, out: &Path) -> Result<()> {
     let mut t = mosaic_core::atomic::TempOutput::create(out)?;
-    img.write_to(&mut std::io::BufWriter::new(t.file()), image::ImageFormat::Png)?;
+    {
+        let mut w = std::io::BufWriter::new(t.file());
+        img.write_to(&mut w, image::ImageFormat::Png)?;
+        w.flush()?;
+    }
     t.commit()
 }
 

@@ -148,7 +148,7 @@ impl Project {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn from_assignments(pool: &Pool, motif: MotifRef, libraries: Vec<LibraryRef>, grid: GridSpec, settings: MatchSettings, outline: Option<Outline>, cells: &[Lab], tiles: Vec<TileAssign>, stats: MatchStats) -> Self {
+    pub(crate) fn from_assignments(pool: &Pool, motif: MotifRef, libraries: Vec<LibraryRef>, grid: GridSpec, settings: MatchSettings, outline: Option<Outline>, cells: &[Lab], tiles: Vec<TileAssign>, stats: MatchStats) -> Self {
         // Keep only the photos actually used, in first-use order.
         let mut remap: HashMap<u32, u32> = HashMap::new();
         let mut sources = Vec::new();
@@ -186,8 +186,11 @@ impl Project {
 
     pub fn save(&self, path: &Path) -> Result<()> {
         let mut out = TempOutput::create(path)?;
-        serde_json::to_writer(std::io::BufWriter::new(out.file()), self)?;
-        out.file().flush()?;
+        {
+            let mut w = std::io::BufWriter::new(out.file());
+            serde_json::to_writer(&mut w, self)?;
+            w.flush()?;
+        }
         out.commit()
     }
 
@@ -199,6 +202,10 @@ impl Project {
         }
         // A damaged or hand-edited file must give an error here, not a crash later.
         GridSpec::new(p.grid.width_mm, p.grid.height_mm, p.grid.cols, p.grid.rows).context("project has an invalid grid")?;
+        p.settings.validate().context("project has invalid settings")?;
+        if let Some(o) = &p.outline {
+            o.validate().context("project has an invalid outline")?;
+        }
         if p.tiles.len() != p.grid.tiles() {
             bail!("project is inconsistent: {} tiles for a {}×{} grid", p.tiles.len(), p.grid.cols, p.grid.rows);
         }
@@ -211,6 +218,9 @@ impl Project {
         }
         if p.sources.iter().any(|s| s.width == 0 || s.height == 0) {
             bail!("project is inconsistent: a source photo has no size");
+        }
+        if p.sources.iter().any(|s| unhex(&s.hash).is_err()) {
+            bail!("project is inconsistent: a source photo has an invalid hash");
         }
         Ok(p)
     }
@@ -313,7 +323,8 @@ impl SourceCheck {
         let mut s = format!("{} of {} source photos are unavailable ({} tiles affected):\n", self.problems.len(), p.sources.len(), tiles);
         for pr in self.problems.iter().take(20) {
             let where_ = pr.paths.first().map(|p| p.display().to_string()).unwrap_or_else(|| "(no indexed file)".into());
-            s += &format!("  {:?}: {} [{} tiles] {}\n", pr.kind, &pr.hash[..12], pr.tiles, where_);
+            let short: String = pr.hash.chars().take(12).collect();
+            s += &format!("  {:?}: {short} [{} tiles] {}\n", pr.kind, pr.tiles, where_);
         }
         if self.problems.len() > 20 {
             s += &format!("  … and {} more\n", self.problems.len() - 20);
@@ -577,7 +588,11 @@ pub fn write_output_stats(cat: &Catalog, p: &Project, output: &Path, kind: &str,
     let st = output_stats(cat, p, output, kind, details)?;
     let path = stats_path(output);
     let mut t = TempOutput::create(&path)?;
-    serde_json::to_writer_pretty(std::io::BufWriter::new(t.file()), &st)?;
+    {
+        let mut w = std::io::BufWriter::new(t.file());
+        serde_json::to_writer_pretty(&mut w, &st)?;
+        w.flush()?;
+    }
     t.commit()?;
     Ok((path, st))
 }

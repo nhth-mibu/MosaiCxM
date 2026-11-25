@@ -142,6 +142,9 @@ fn catch_panic<T>(f: impl FnOnce() -> Result<T>) -> Result<T> {
 
 /// Run `work` on a worker thread with progress, cancellation and error display.
 fn run_job(ui: &AppWindow, st: &Shared, label: &str, work: impl FnOnce(&Job, PathBuf) -> Result<Apply> + Send + 'static) {
+    if ui.get_busy() || st.lock().unwrap().job.is_some() {
+        return;
+    }
     let weak = ui.as_weak();
     let last = Arc::new(Mutex::new(Instant::now()));
     let w2 = weak.clone();
@@ -599,10 +602,14 @@ fn show_project(ui: &AppWindow, s: &mut State, p: Project, buf: SharedPixelBuffe
         show_motif(ui, &p.motif.path);
         ui.set_width_mm(format!("{}", p.grid.width_mm).into());
         ui.set_height_mm(format!("{}", p.grid.height_mm).into());
-        ui.set_use_grid(false);
+        let rounded_tile = (p.grid.tile_mm().0 * 2.0).round() / 2.0;
+        let matches_tile = rounded_tile > 0.0
+            && GridSpec::from_tile_mm(p.grid.width_mm, p.grid.height_mm, rounded_tile)
+                .is_ok_and(|g| g.cols == p.grid.cols && g.rows == p.grid.rows);
+        ui.set_use_grid(!matches_tile);
         ui.set_cols(p.grid.cols as i32);
         ui.set_rows(p.grid.rows as i32);
-        ui.set_tile_mm(format!("{}", (p.grid.tile_mm().0 * 2.0).round() / 2.0).into());
+        ui.set_tile_mm(format!("{}", if rounded_tile > 0.0 { rounded_tile } else { p.grid.tile_mm().0 }).into());
         let si = STYLES.iter().position(|(m, _)| *m == p.settings.method).unwrap_or(1);
         ui.set_style_index(si as i32);
         ui.set_unlimited_reuse(p.settings.max_reuse.is_none());
@@ -1016,7 +1023,11 @@ fn check_folder(ui: &AppWindow, st: &Shared, path: PathBuf) {
                 let crop = [(w as f32 - side) / 2.0 / w as f32, (h as f32 - side) * t / h as f32, side / w as f32, side / h as f32];
                 let Ok(t) = resize_crop(&d.image, crop, CHECK_THUMB_PX, CHECK_THUMB_PX) else { continue };
                 let buf = to_image(&t);
+                let is_cur = current.clone();
                 let _ = weak.upgrade_in_event_loop(move |ui| {
+                    if !is_cur() {
+                        return;
+                    }
                     let m = ui.get_check_thumbs();
                     if let Some(v) = m.as_any().downcast_ref::<VecModel<Image>>() {
                         v.push(Image::from_rgb8(buf));
@@ -1046,7 +1057,11 @@ fn check_folder(ui: &AppWindow, st: &Shared, path: PathBuf) {
                     return;
                 }
                 last = Instant::now();
+                let is_cur = current.clone();
                 let _ = weak.upgrade_in_event_loop(move |ui| {
+                    if !is_cur() {
+                        return;
+                    }
                     ui.set_check_count(found as i32);
                     ui.set_check_summary(format!("Looking for photos… {} found so far. You can use this folder now.", thousands(found as u64)).into());
                 });
@@ -1063,7 +1078,11 @@ fn check_folder(ui: &AppWindow, st: &Shared, path: PathBuf) {
             t if t <= CHECK_THUMBS => format!("{} photos found (subfolders included).", thousands(t as u64)),
             t => format!("{} photos found (subfolders included). Showing the first {CHECK_THUMBS}.", thousands(t as u64)),
         };
+        let is_cur = current.clone();
         let _ = weak.upgrade_in_event_loop(move |ui| {
+            if !is_cur() {
+                return;
+            }
             ui.set_check_count(total as i32);
             ui.set_check_summary(summary.into());
             ui.set_check_done(true);
@@ -1244,6 +1263,9 @@ fn main() -> Result<()> {
         let (w, s) = (ui.as_weak(), st.clone());
         ui.on_confirm_folder(move || {
             let ui = w.unwrap();
+            if ui.get_busy() {
+                return;
+            }
             let Some(path) = s.lock().unwrap().check.take().map(|(_, p)| p) else { return };
             ui.set_main_view(0);
             let r = {
@@ -1274,6 +1296,9 @@ fn main() -> Result<()> {
         let (w, s) = (ui.as_weak(), st.clone());
         ui.on_remove_folder(move |i| {
             let ui = w.unwrap();
+            if ui.get_busy() {
+                return;
+            }
             let mut s = s.lock().unwrap();
             let Some((lib, path)) = s.folders.get(i as usize).cloned() else { return };
             match Catalog::open(&s.data_dir).and_then(|c| c.remove_root(lib, &path)) {
@@ -1293,8 +1318,14 @@ fn main() -> Result<()> {
         let (w, s) = (ui.as_weak(), st.clone());
         ui.on_find_folder(move |i| {
             let ui = w.unwrap();
+            if ui.get_busy() {
+                return;
+            }
             let Some((lib, old)) = s.lock().unwrap().folders.get(i as usize).cloned() else { return };
             let Some(new) = rfd::FileDialog::new().set_title(format!("Where is “{}” now?", file_name(&old))).pick_folder() else { return };
+            if ui.get_busy() {
+                return;
+            }
             let r = {
                 let mut st = s.lock().unwrap();
                 let r = Catalog::open(&st.data_dir).and_then(|c| c.relink_root(lib, &old, &new, false));
@@ -1365,15 +1396,19 @@ fn main() -> Result<()> {
         let (w, s) = (ui.as_weak(), st.clone());
         ui.on_browse_shape(move || {
             let ui = w.unwrap();
-            if let Some(p) = rfd::FileDialog::new().set_title("Choose a shape (SVG or picture)").add_filter("Shapes", &["svg", "png", "jpg", "jpeg", "webp"]).pick_file() {
+            let picked = if let Some(p) = rfd::FileDialog::new().set_title("Choose a shape (SVG or picture)").add_filter("Shapes", &["svg", "png", "jpg", "jpeg", "webp"]).pick_file() {
                 ui.set_shape_file(p.display().to_string().into());
                 ui.set_shape_file_name(file_name(&p).into());
                 ui.set_shape_index(6);
-                mark_stale(&ui);
-            } else if ui.get_shape_file().is_empty() {
-                ui.set_shape_index(0);
-            }
+                true
+            } else {
+                if ui.get_shape_file().is_empty() {
+                    ui.set_shape_index(0);
+                }
+                false
+            };
             update_grid_info(&ui, &s.lock().unwrap());
+            picked
         });
     }
     {
@@ -1388,6 +1423,9 @@ fn main() -> Result<()> {
         let (w, s) = (ui.as_weak(), st.clone());
         ui.on_suggest(move || {
             let ui = w.unwrap();
+            if ui.get_busy() {
+                return;
+            }
             let (libs, (grid, settings)) = match (selected_libs(&s.lock().unwrap()), read_settings(&ui)) {
                 (Ok(l), Ok(x)) => (l, x),
                 (Err(e), _) | (_, Err(e)) => return report_error(&ui, e),
@@ -1482,6 +1520,9 @@ fn main() -> Result<()> {
         let (w, s) = (ui.as_weak(), st.clone());
         ui.on_generate(move || {
             let ui = w.unwrap();
+            if ui.get_busy() {
+                return;
+            }
             let (libs, (grid, settings)) = match (selected_libs(&s.lock().unwrap()), read_settings(&ui)) {
                 (Ok(l), Ok(x)) => (l, x),
                 (Err(e), _) | (_, Err(e)) => return report_error(&ui, e),
@@ -1537,7 +1578,13 @@ fn main() -> Result<()> {
         let (w, s) = (ui.as_weak(), st.clone());
         ui.on_open_project(move || {
             let ui = w.unwrap();
+            if ui.get_busy() {
+                return;
+            }
             let Some(path) = rfd::FileDialog::new().set_title("Open mosaic").add_filter("Mosaic project", &["json"]).pick_file() else { return };
+            if ui.get_busy() {
+                return;
+            }
             run_job(&ui, &s, "Opening mosaic", move |job, dd| {
                 let cat = Catalog::open(&dd)?;
                 let p = Project::load(&path)?;
@@ -1682,6 +1729,9 @@ fn main() -> Result<()> {
         let (w, s) = (ui.as_weak(), st.clone());
         ui.on_export(move || {
             let ui = w.unwrap();
+            if ui.get_busy() {
+                return;
+            }
             if ui.get_preview_stale() {
                 return report_error(&ui, anyhow!("wait for the preview to update before exporting; click Update preview to retry if needed"));
             }

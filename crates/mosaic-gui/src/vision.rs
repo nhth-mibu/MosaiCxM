@@ -145,7 +145,9 @@ impl Config {
             }
             _ => {
                 let message = &response["choices"][0]["message"];
-                if !message["refusal"].is_null() { bail!("the vision model refused to classify the image"); }
+                if !message["refusal"].is_null() && message["refusal"].as_str().map_or(true, |s| !s.trim().is_empty()) {
+                    bail!("the vision model refused to classify the image");
+                }
                 let text = message["content"].as_str().ok_or_else(|| anyhow!("the vision model returned no classification"))?;
                 let result: Value = serde_json::from_str(text).context("the vision model did not return valid classification JSON")?;
                 return result["document"].as_bool().ok_or_else(|| anyhow!("the vision model must return a boolean document field"));
@@ -348,6 +350,7 @@ mod tests {
         let config = Config::new(Provider::Ollama, "http://localhost:11434/v1", "test", "").unwrap();
         assert!(config.parse(json!({"choices":[{"message":{"content":"{\"document\":\"false\"}"}}]})).is_err());
         assert!(config.parse(json!({"choices":[{"message":{"refusal":"refused","content":"{\"document\":false}"}}]})).is_err());
+        assert!(!config.parse(json!({"choices":[{"message":{"refusal":"","content":"{\"document\":false}"}}]})).unwrap());
         assert!(!config.parse(json!({"choices":[{"message":{"content":"{\"document\":false}"}}]})).unwrap());
     }
 }

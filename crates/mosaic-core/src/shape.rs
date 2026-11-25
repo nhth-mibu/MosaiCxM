@@ -163,7 +163,7 @@ pub fn coverage(shape: &Shape, grid: &GridSpec) -> Result<Vec<f32>> {
     let (gw, gh) = (cols * ss, rows * ss);
     let samples: Vec<f32> = match shape {
         Shape::File { path, invert, cover, .. } => {
-            let m = load_mask(path, *cover, gw as u32, gh as u32)?;
+            let m = load_mask(path, *cover, grid.width_mm, grid.height_mm, gw as u32, gh as u32)?;
             m.as_raw().iter().map(|&v| if *invert { 1.0 - v as f32 / 255.0 } else { v as f32 / 255.0 }).collect()
         }
         _ => {
@@ -191,21 +191,35 @@ pub fn coverage(shape: &Shape, grid: &GridSpec) -> Result<Vec<f32>> {
 }
 
 /// Scale and offset that place an `sw × sh` source centred in `w × h`.
-fn fit(sw: f64, sh: f64, w: u32, h: u32, cover: bool) -> (f64, f64, f64) {
-    let (a, b) = (w as f64 / sw, h as f64 / sh);
+fn fit(sw: f64, sh: f64, w: f64, h: f64, cover: bool) -> (f64, f64, f64) {
+    let (a, b) = (w / sw, h / sh);
     let s = if cover { a.max(b) } else { a.min(b) };
-    (s, (w as f64 - sw * s) / 2.0, (h as f64 - sh * s) / 2.0)
+    (s, (w - sw * s) / 2.0, (h - sh * s) / 2.0)
 }
 
-/// Mask resampled to `w × h` (255 = inside), centred on the artwork.
-fn load_mask(path: &Path, cover: bool, w: u32, h: u32) -> Result<GrayImage> {
+/// Mask resampled to `w × h` (255 = inside), centred on the physical artwork (`art_w × art_h` mm).
+fn load_mask(path: &Path, cover: bool, art_w: f64, art_h: f64, w: u32, h: u32) -> Result<GrayImage> {
+    let meta = std::fs::metadata(path).with_context(|| format!("cannot read shape file {}", path.display()))?;
+    if meta.len() > crate::decode::MAX_FILE_BYTES {
+        bail!("shape file is too large ({} bytes): {}", meta.len(), path.display());
+    }
     let bytes = std::fs::read(path).with_context(|| format!("cannot read shape file {}", path.display()))?;
     let is_svg = path.extension().map(|e| e.eq_ignore_ascii_case("svg") || e.eq_ignore_ascii_case("svgz")).unwrap_or(false)
         || looks_like_svg(&bytes);
     if is_svg {
-        return render_svg(&bytes, cover, w, h).with_context(|| format!("cannot read SVG shape {}", path.display()));
+        return render_svg(&bytes, cover, art_w, art_h, w, h).with_context(|| format!("cannot read SVG shape {}", path.display()));
     }
-    let img = image::load_from_memory(&bytes).with_context(|| format!("cannot decode shape image {}", path.display()))?;
+    use image::{metadata::Orientation, DynamicImage, ImageDecoder};
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(&bytes))
+        .with_guessed_format()
+        .with_context(|| format!("cannot decode shape image {}", path.display()))?;
+    let mut limits = image::Limits::default();
+    limits.max_alloc = Some(crate::decode::MAX_DECODE_BYTES);
+    reader.limits(limits);
+    let mut dec = reader.into_decoder().with_context(|| format!("cannot decode shape image {}", path.display()))?;
+    let orientation = dec.orientation().unwrap_or(Orientation::NoTransforms);
+    let mut img = DynamicImage::from_decoder(dec).with_context(|| format!("cannot decode shape image {}", path.display()))?;
+    img.apply_orientation(orientation);
     let has_alpha = img.color().has_alpha() && img.to_rgba8().pixels().any(|p| p[3] < 250);
     let gray: GrayImage = if has_alpha {
         let rgba = img.to_rgba8();
@@ -217,14 +231,18 @@ fn load_mask(path: &Path, cover: bool, w: u32, h: u32) -> Result<GrayImage> {
         }
         l
     };
-    // Crop the visible part of the source first (cover), then scale it.
-    let (s, ox, oy) = fit(gray.width() as f64, gray.height() as f64, w, h, cover);
-    let x0 = ((-ox / s).max(0.0).floor() as u32).min(gray.width() - 1);
-    let y0 = ((-oy / s).max(0.0).floor() as u32).min(gray.height() - 1);
-    let cw = (((w as f64 - ox.max(0.0) * 2.0) / s).round() as u32).clamp(1, gray.width() - x0);
-    let ch = (((h as f64 - oy.max(0.0) * 2.0) / s).round() as u32).clamp(1, gray.height() - y0);
+    if gray.width() == 0 || gray.height() == 0 {
+        bail!("shape image is empty: {}", path.display());
+    }
+    // Fit in physical artwork millimetres, then map to the sample grid (which may have non-square tiles).
+    let (s_mm, ox_mm, oy_mm) = fit(gray.width() as f64, gray.height() as f64, art_w, art_h, cover);
+    let x0 = ((-ox_mm / s_mm).max(0.0).floor() as u32).min(gray.width() - 1);
+    let y0 = ((-oy_mm / s_mm).max(0.0).floor() as u32).min(gray.height() - 1);
+    let cw = (((art_w - ox_mm.max(0.0) * 2.0) / s_mm).round() as u32).clamp(1, gray.width() - x0);
+    let ch = (((art_h - oy_mm.max(0.0) * 2.0) / s_mm).round() as u32).clamp(1, gray.height() - y0);
     let sub = image::imageops::crop_imm(&gray, x0, y0, cw, ch).to_image();
-    let (rw, rh) = (((cw as f64 * s).round() as u32).clamp(1, w), ((ch as f64 * s).round() as u32).clamp(1, h));
+    let (sx, sy) = (s_mm * w as f64 / art_w, s_mm * h as f64 / art_h);
+    let (rw, rh) = (((cw as f64 * sx).round() as u32).clamp(1, w), ((ch as f64 * sy).round() as u32).clamp(1, h));
     let scaled = image::imageops::resize(&sub, rw, rh, image::imageops::FilterType::Triangle);
     let mut out = GrayImage::new(w, h);
     image::imageops::overlay(&mut out, &scaled, ((w - rw) / 2) as i64, ((h - rh) / 2) as i64);
@@ -236,7 +254,7 @@ fn looks_like_svg(b: &[u8]) -> bool {
     head.contains("<svg")
 }
 
-fn render_svg(bytes: &[u8], cover: bool, w: u32, h: u32) -> Result<GrayImage> {
+fn render_svg(bytes: &[u8], cover: bool, art_w: f64, art_h: f64, w: u32, h: u32) -> Result<GrayImage> {
     use resvg::{tiny_skia, usvg};
     let tree = usvg::Tree::from_data(bytes, &usvg::Options::default()).map_err(|e| anyhow!("{e}"))?;
     let size = tree.size();
@@ -244,10 +262,11 @@ fn render_svg(bytes: &[u8], cover: bool, w: u32, h: u32) -> Result<GrayImage> {
     if !(sw > 0.0 && sh > 0.0) {
         bail!("SVG has no size");
     }
-    let (scale, tx, ty) = fit(sw as f64, sh as f64, w, h, cover);
-    let (scale, tx, ty) = (scale as f32, tx as f32, ty as f32);
+    let (s_mm, ox_mm, oy_mm) = fit(sw as f64, sh as f64, art_w, art_h, cover);
+    let (sx, sy) = ((s_mm * w as f64 / art_w) as f32, (s_mm * h as f64 / art_h) as f32);
+    let (tx, ty) = ((ox_mm * w as f64 / art_w) as f32, (oy_mm * h as f64 / art_h) as f32);
     let mut pm = tiny_skia::Pixmap::new(w, h).ok_or_else(|| anyhow!("mask too large"))?;
-    resvg::render(&tree, tiny_skia::Transform::from_row(scale, 0.0, 0.0, scale, tx, ty), &mut pm.as_mut());
+    resvg::render(&tree, tiny_skia::Transform::from_row(sx, 0.0, 0.0, sy, tx, ty), &mut pm.as_mut());
     Ok(GrayImage::from_raw(w, h, pm.data().chunks_exact(4).map(|p| p[3]).collect()).unwrap())
 }
 

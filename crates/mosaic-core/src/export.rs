@@ -215,10 +215,12 @@ pub fn export_raster(project: &Project, source: &dyn TileSource, plan: &RasterPl
                 }
                 sw.finish()?;
             }
+            writer.finish()?;
         }
         RasterFormat::Jpeg => {
-            let bw = BufWriter::with_capacity(1 << 20, tmp.file());
-            write_jpeg_region(bw, &renderer, 0, 0, w, h, 92, plan.spec.dpi, job, "exporting JPEG")?;
+            let mut bw = BufWriter::with_capacity(1 << 20, tmp.file());
+            write_jpeg_region(&mut bw, &renderer, 0, 0, w, h, 92, plan.spec.dpi, job, "exporting JPEG")?;
+            bw.flush()?;
         }
     }
     job.check()?;

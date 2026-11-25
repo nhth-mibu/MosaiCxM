@@ -102,7 +102,10 @@ pub fn update_library(cat: &Catalog, lib: i64, opts: &IndexOptions, job: &Job) -
         v
     };
     for root in cat.roots(lib)? {
-        job.check()?;
+        if job.is_cancelled() {
+            rep.cancelled = true;
+            break;
+        }
         if !root.path.is_dir() {
             rep.roots_missing.push(root.path.clone());
             continue;
@@ -388,6 +391,7 @@ pub fn read_exif(bytes: &[u8]) -> (AttributionPair, PhotoExif) {
 fn apply_attribution_sidecar(cat: &Catalog, root_id: i64, root: &Path) -> Result<()> {
     let p = root.join("attribution.csv");
     let Ok(text) = std::fs::read_to_string(&p) else { return Ok(()) };
+    let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
     let mut lines = text.lines().filter(|l| !l.trim().is_empty());
     let Some(header) = lines.next() else { return Ok(()) };
     let cols: Vec<String> = parse_csv_line(header).into_iter().map(|c| c.trim().to_ascii_lowercase()).collect();
@@ -399,10 +403,11 @@ fn apply_attribution_sidecar(cat: &Catalog, root_id: i64, root: &Path) -> Result
         let f = parse_csv_line(line);
         let get = |i: Option<usize>| i.and_then(|i| f.get(i)).map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
         let Some(rel) = get(Some(pi)) else { continue };
+        let alt = if rel.contains('/') { rel.replace('/', "\\") } else { rel.replace('\\', "/") };
         cat.conn.execute(
             "UPDATE file SET artist = COALESCE(?1, artist), copyright = COALESCE(?2, copyright), license = COALESCE(?3, license),
-             source = COALESCE(?4, source) WHERE root_id = ?5 AND rel_path = ?6",
-            params![get(ai), get(ci), get(li), get(si), root_id, rel],
+             source = COALESCE(?4, source) WHERE root_id = ?5 AND (rel_path = ?6 OR rel_path = ?7)",
+            params![get(ai), get(ci), get(li), get(si), root_id, rel, alt],
         )?;
     }
     tx.commit()?;
@@ -431,5 +436,5 @@ pub fn parse_csv_line(line: &str) -> Vec<String> {
 }
 
 pub fn csv_field(s: &str) -> String {
-    if s.contains([',', '"', '\n']) { format!("\"{}\"", s.replace('"', "\"\"")) } else { s.to_string() }
+    if s.contains([',', '"', '\n', '\r']) { format!("\"{}\"", s.replace('"', "\"\"")) } else { s.to_string() }
 }

@@ -168,6 +168,10 @@ fn load_small(pre: Prefetched, c: &MotifCandidate) -> Result<Loaded> {
     match (&c.source, c.hash, pre) {
         (MotifSource::Library { .. }, Some(h), Some((t, d))) => Ok(Loaded { small: decode::decode_bytes(&t, None)?.image, hash: Some(h), dhash: d }),
         (MotifSource::File(p), _, _) => {
+            let meta = std::fs::metadata(p)?;
+            if meta.len() > decode::MAX_FILE_BYTES {
+                anyhow::bail!("file too large ({} bytes)", meta.len());
+            }
             let bytes = std::fs::read(p)?;
             let d = decode::decode_bytes(&bytes, Some(256))?;
             let desc = descriptor::compute(&d.image, d.info.full_width, d.info.full_height);
@@ -289,6 +293,7 @@ pub fn recommend(cat: &Catalog, pool: &Pool, cands: Vec<MotifCandidate>, grid: &
                     rec.preview = prev;
                     notes.extend(tnotes);
                 }
+                Err(e) if crate::job::is_cancelled(&e) => return Err(e),
                 Err(e) => notes.push(format!("trial mosaic failed: {e}")),
             }
             if rec.excluded_self {
@@ -450,7 +455,7 @@ fn trial(cat: &Catalog, c: &MotifCandidate, ld: &Loaded, pool: &Pool, grid: &Gri
             notes.push(format!("not feasible with these reuse settings: {}", inf.message));
             return Ok((TrialScores { cols: tg.cols, rows: tg.rows, ..Default::default() }, None, notes));
         }
-        Err(e) => return Err(anyhow::anyhow!("{e}")),
+        Err(crate::matching::MatchError::Other(e)) => return Err(e),
     };
     // Edge preservation: correlation of horizontal+vertical tile-mean L gradients.
     let cands_l: Vec<f32> = assign
@@ -483,9 +488,9 @@ fn trial(cat: &Catalog, c: &MotifCandidate, ld: &Loaded, pool: &Pool, grid: &Gri
     let mut preview = None;
     if let Some(dir) = &opts.preview_dir {
         std::fs::create_dir_all(dir)?;
-        // Build a throwaway project for rendering the trial from thumbnails.
+        // Build a throwaway project from the trial assignment we already computed.
         let motif = crate::project::MotifRef { path: PathBuf::from(&c.label), content_hash: String::new(), width: img.width(), height: img.height(), crop };
-        let p = crate::project::Project::create(pool, vec![], &target, motif, tg, ts.clone(), job).map_err(|e| anyhow::anyhow!("{e}"))?;
+        let p = crate::project::Project::from_assignments(pool, motif, vec![], tg, ts.clone(), None, &target.cells(), assign, stats.clone());
         let pimg = crate::render::render_preview(cat, &p, opts.preview_tile_px, job)?;
         let path = dir.join(format!("suggestion-{:02}.png", rank + 1));
         pimg.save(&path)?;

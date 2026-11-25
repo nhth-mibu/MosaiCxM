@@ -269,9 +269,15 @@ component ColorButton inherits Rectangle {
 component LinkButton inherits Text {
     callback clicked();
     in property <color> tint: Theme.muted;
-    color: ta.has-hover ? Theme.fg : root.tint;
+    in property <bool> enabled: true;
+    color: !root.enabled ? Theme.muted : ta.has-hover ? Theme.fg : root.tint;
+    opacity: root.enabled ? 1.0 : 0.5;
     font-size: 12px;
-    ta := TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
+    ta := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: root.enabled ? pointer : default;
+        clicked => { root.clicked(); }
+    }
 }
 
 // One row of the Help menu. `mark` shows a tick for on/off items.
@@ -583,6 +589,9 @@ component ZoomView inherits Rectangle {
 
     // Keeps the mosaic on screen and tells the app what is visible.
     function settle() {
+        if root.img-w <= 0px || root.img-h <= 0px {
+            return;
+        }
         root.cx = root.img-w <= root.width ? 0.5 : clamp(root.cx, root.width / root.img-w / 2, 1 - root.width / root.img-w / 2);
         root.cy = root.img-h <= root.height ? 0.5 : clamp(root.cy, root.height / root.img-h / 2, 1 - root.height / root.img-h / 2);
         root.view-changed(root.zoom, root.cx, root.cy, root.img-w, root.img-h, root.width, root.height);
@@ -593,6 +602,9 @@ component ZoomView inherits Rectangle {
     }
     // Zooms by `factor`, keeping the point (px, py) of the view in place.
     function zoom-at(factor: float, px: length, py: length) {
+        if root.img-w <= 0px || root.img-h <= 0px {
+            return;
+        }
         let u = (px - root.img-x) / root.img-w;
         let v = (py - root.img-y) / root.img-h;
         root.distance = 0;
@@ -612,6 +624,9 @@ component ZoomView inherits Rectangle {
     // for 40° of sight, about what the eyes take in at one time:
     // 2 · d · tan(20°) = 0.728 · d metres of wall.
     function view-from(d: float) {
+        if root.fit-w <= 0px || d <= 0 {
+            return;
+        }
         root.distance = d;
         root.zoom = clamp(root.width / root.fit-w * root.artwork-mm / (728 * d), 0.02, root.max-zoom);
         root.cx = 0.5;
@@ -703,7 +718,7 @@ component ZoomView inherits Rectangle {
                 root.primary-press = e.button == PointerEventButton.left;
                 root.press-cx = root.cx;
                 root.press-cy = root.cy;
-                if e.button == PointerEventButton.right {
+                if e.button == PointerEventButton.right && root.img-w > 0px && root.img-h > 0px {
                     click-timer.running = false;
                     root.card-right = self.mouse-x < root.width / 2;
                     root.tile-inspect((self.mouse-x - root.img-x) / root.img-w, (self.mouse-y - root.img-y) / root.img-h);
@@ -711,14 +726,14 @@ component ZoomView inherits Rectangle {
             }
         }
         moved => {
-            if root.primary-press {
+            if root.primary-press && root.img-w > 0px && root.img-h > 0px {
                 root.cx = root.press-cx - (self.mouse-x - self.pressed-x) / root.img-w;
                 root.cy = root.press-cy - (self.mouse-y - self.pressed-y) / root.img-h;
                 root.settle();
             }
         }
-        changed mouse-x => { root.hover((self.mouse-x - root.img-x) / root.img-w, (self.mouse-y - root.img-y) / root.img-h); }
-        changed mouse-y => { root.hover((self.mouse-x - root.img-x) / root.img-w, (self.mouse-y - root.img-y) / root.img-h); }
+        changed mouse-x => { if root.img-w > 0px && root.img-h > 0px { root.hover((self.mouse-x - root.img-x) / root.img-w, (self.mouse-y - root.img-y) / root.img-h); } }
+        changed mouse-y => { if root.img-w > 0px && root.img-h > 0px { root.hover((self.mouse-x - root.img-x) / root.img-w, (self.mouse-y - root.img-y) / root.img-h); } }
         scroll-event(e) => {
             if e.delta-y == 0 {
                 return reject;
@@ -727,7 +742,7 @@ component ZoomView inherits Rectangle {
             accept
         }
         clicked => {
-            if root.primary-press && abs(self.mouse-x - self.pressed-x) < 4px && abs(self.mouse-y - self.pressed-y) < 4px {
+            if root.primary-press && root.img-w > 0px && root.img-h > 0px && abs(self.mouse-x - self.pressed-x) < 4px && abs(self.mouse-y - self.pressed-y) < 4px {
                 root.click-u = (self.mouse-x - root.img-x) / root.img-w;
                 root.click-v = (self.mouse-y - root.img-y) / root.img-h;
                 click-timer.running = false;
@@ -1230,7 +1245,7 @@ export component AppWindow inherits Window {
 
     callback browse-motif();
     callback swap-size();
-    callback browse-shape();
+    callback browse-shape() -> bool;
     callback browse-suggest-folder();
     callback suggest();
     callback use-suggestion(int);
@@ -1411,11 +1426,13 @@ export component AppWindow inherits Window {
                                             tint: Theme.fg;
                                             font-weight: 600;
                                             vertical-alignment: center;
+                                            enabled: !root.busy;
                                             clicked => { root.find-folder(i); }
                                         }
                                         LinkButton {
                                             text: "Remove";
                                             vertical-alignment: center;
+                                            enabled: !root.busy;
                                             clicked => { root.remove-folder(i); }
                                         }
                                     }
@@ -1643,8 +1660,11 @@ export component AppWindow inherits Window {
                                         model: ["Rectangle", "Ellipse", "Heart", "Hexagon", "Diamond", "Star", "From file (SVG, PNG, JPG…)"];
                                         current-index <=> root.shape-index;
                                         selected => {
-                                            if root.shape-index == 6 && root.shape-file == "" { root.browse-shape(); }
-                                            root.changed();
+                                            if root.shape-index == 6 && root.shape-file == "" {
+                                                if root.browse-shape() { root.changed(); }
+                                            } else {
+                                                root.changed();
+                                            }
                                         }
                                     }
                                 }
@@ -1652,7 +1672,7 @@ export component AppWindow inherits Window {
                                     label: "Shape file";
                                     tip: "SVG: the drawn parts make the shape. PNG with transparency: the solid parts make the shape. Other pictures: the dark parts make the shape.";
                                     Text { text: root.shape-file-name == "" ? "None chosen" : root.shape-file-name; color: Theme.fg; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; }
-                                    Button { text: "Choose…"; clicked => { root.browse-shape(); } }
+                                    Button { text: "Choose…"; clicked => { if root.browse-shape() { root.changed(); } } }
                                 }
                                 if root.shape-index == 6: TipCheck { text: "Swap inside and outside"; tip: "Put the tiles outside the shape, not inside it."; checked <=> root.shape-invert; toggled => { root.changed(); } }
                                 if root.shape-index > 0: Field {
