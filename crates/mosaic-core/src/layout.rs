@@ -147,8 +147,13 @@ pub fn compute_layout(art_w: f64, art_h: f64, s: &PrintSettings) -> Result<Layou
     if !(sw > 0.0 && sh > 0.0) || sw > MAX_PDF_PAGE_MM || sh > MAX_PDF_PAGE_MM {
         bail!("paper size {sw}×{sh} mm is outside the supported range (0–{MAX_PDF_PAGE_MM} mm)");
     }
-    if s.margins_mm.iter().any(|m| !(*m >= 0.0)) || s.overlap_mm < 0.0 || s.mark_space_mm < 0.0 {
-        bail!("margins, overlap and mark space must not be negative");
+    if s.margins_mm.iter().any(|m| !m.is_finite() || *m < 0.0)
+        || !s.overlap_mm.is_finite()
+        || s.overlap_mm < 0.0
+        || !s.mark_space_mm.is_finite()
+        || s.mark_space_mm < 0.0
+    {
+        bail!("margins, overlap and mark space must be finite and not negative");
     }
     if !(s.dpi >= 30.0 && s.dpi <= 1200.0) {
         bail!("print resolution must be between 30 and 1200 DPI");

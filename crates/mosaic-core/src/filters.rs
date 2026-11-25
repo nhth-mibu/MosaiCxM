@@ -67,6 +67,7 @@ impl PhotoFilters {
             }
         } else { offline_key.clone() };
         let mut photos = Vec::new();
+        let mut unreadable = 0usize;
         for (i, p) in pool.photos.iter().enumerate() {
             if classifier.is_some() || i % 128 == 0 {
                 job.check()?;
@@ -83,7 +84,10 @@ impl PhotoFilters {
                 let (document, from_model) = match cached {
                     Some(v) => v,
                     None => {
-                        let image = analysis_image(cat, p, libs)?;
+                        let Ok(image) = analysis_image(cat, p, libs) else {
+                            unreadable += 1;
+                            continue;
+                        };
                         job.check()?;
                         let document = match classifier {
                             Some(c) => {
@@ -105,6 +109,9 @@ impl PhotoFilters {
             photos.push(p.clone());
         }
         if photos.is_empty() {
+            if unreadable > 0 {
+                bail!("cannot inspect unchanged original photos for the document filter; reconnect or rescan your folders, or turn off Skip likely documents/screenshots");
+            }
             bail!("no photos match these filters; choose All photos / All colours, turn off Skip likely documents/screenshots, or add more photos");
         }
         job.check()?;

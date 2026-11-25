@@ -100,9 +100,19 @@ pub fn plan_pdf(project: &Project, print: &PrintSettings) -> Result<PdfPlan> {
     let g = &project.grid;
     let layout = compute_layout(g.width_mm, g.height_mm, print)?;
     let spec = RasterSpec::new(g.width_mm, g.height_mm, print.dpi)?;
-    let blank: Vec<bool> = layout.pages.iter().map(|p| !project.window_has_tiles(p.x0, p.x1, p.y0, p.y1)).collect();
+    let blank: Vec<bool> = layout
+        .pages
+        .iter()
+        .map(|p| !project.window_has_tiles(p.x0, p.x1, p.y0, p.y1) || spec.x_px(p.x1) <= spec.x_px(p.x0) || spec.y_px(p.y1) <= spec.y_px(p.y0))
+        .collect();
+    if blank.iter().all(|&b| b) {
+        bail!("no printable pixels at {} DPI; increase DPI or check paper settings", print.dpi);
+    }
     let mut max_page_px = (0, 0);
-    for p in &layout.pages {
+    for (p, &is_blank) in layout.pages.iter().zip(&blank) {
+        if is_blank {
+            continue;
+        }
         let w = spec.x_px(p.x1) - spec.x_px(p.x0);
         let h = spec.y_px(p.y1) - spec.y_px(p.y0);
         max_page_px = (max_page_px.0.max(w), max_page_px.1.max(h));

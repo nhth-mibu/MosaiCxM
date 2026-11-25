@@ -156,7 +156,13 @@ fn decode_jpeg(bytes: &[u8], min_short_side: Option<u32>) -> Result<Decoded> {
     let rgb: Vec<u8> = match info.pixel_format {
         jpeg_decoder::PixelFormat::RGB24 => pixels,
         jpeg_decoder::PixelFormat::L8 => pixels.iter().flat_map(|&v| [v, v, v]).collect(),
-        jpeg_decoder::PixelFormat::L16 => pixels.chunks_exact(2).flat_map(|c| [c[0], c[0], c[0]]).collect(),
+        jpeg_decoder::PixelFormat::L16 => pixels
+            .chunks_exact(2)
+            .flat_map(|c| {
+                let v = (u16::from_ne_bytes([c[0], c[1]]) >> 8) as u8;
+                [v, v, v]
+            })
+            .collect(),
         jpeg_decoder::PixelFormat::CMYK32 => pixels
             .chunks_exact(4)
             .flat_map(|c| {
@@ -284,10 +290,13 @@ fn oriented_dims(w: u32, h: u32, exif: u8) -> (u32, u32) {
 pub fn resize_crop(src: &RgbImage, crop: [f32; 4], dst_w: u32, dst_h: u32) -> Result<RgbImage> {
     use fast_image_resize as fr;
     let (sw, sh) = src.dimensions();
-    let cx = crop[0] as f64 * sw as f64;
-    let cy = crop[1] as f64 * sh as f64;
-    let cw = (crop[2] as f64 * sw as f64).max(1.0).min(sw as f64 - cx);
-    let ch = (crop[3] as f64 * sh as f64).max(1.0).min(sh as f64 - cy);
+    if sw == 0 || sh == 0 {
+        bail!("cannot resize empty image");
+    }
+    let cx = (crop[0] as f64 * sw as f64).clamp(0.0, (sw - 1) as f64);
+    let cy = (crop[1] as f64 * sh as f64).clamp(0.0, (sh - 1) as f64);
+    let cw = (crop[2] as f64 * sw as f64).clamp(1.0, (sw as f64 - cx).max(1.0));
+    let ch = (crop[3] as f64 * sh as f64).clamp(1.0, (sh as f64 - cy).max(1.0));
     let src_view = fr::images::ImageRef::new(sw, sh, src.as_raw(), fr::PixelType::U8x3)?;
     let mut dst = fr::images::Image::new(dst_w.max(1), dst_h.max(1), fr::PixelType::U8x3);
     let opts = fr::ResizeOptions::new()

@@ -187,8 +187,11 @@ pub fn crop_t(photo_aspect: f32, tile_aspect: f32, faces: &[Face], default_t: f3
         if d <= lo && d + keep >= hi { d } else { clamp((lo + hi - keep) / 2.0) }
     } else {
         // Not all fit: try windows that start at a face or end at a face, and
-        // keep the one with the most whole-face area.
-        let mut best = (f32::MIN, default_t * free);
+        // keep the one with the most whole-face area. If no single face fits
+        // wholly inside the crop, centre on the largest face.
+        let largest = faces.iter().max_by(|a, b| (a.rect[2] * a.rect[3]).total_cmp(&(b.rect[2] * b.rect[3]))).unwrap();
+        let (la, lb) = span(largest);
+        let mut best = (0.0f32, clamp((la + lb - keep) / 2.0));
         for f in faces {
             let (a, b) = span(f);
             for s in [clamp(a), clamp(b - keep)] {

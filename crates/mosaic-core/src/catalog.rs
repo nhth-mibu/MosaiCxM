@@ -263,6 +263,14 @@ impl Catalog {
     pub fn relink_root(&self, lib: i64, old: &Path, new: &Path, force: bool) -> Result<RelinkReport> {
         let r = self.find_root(lib, old)?;
         let canon = std::fs::canonicalize(new).with_context(|| format!("new folder not found: {}", new.display()))?;
+        if !canon.is_dir() {
+            bail!("not a folder: {}", canon.display());
+        }
+        for other in self.roots(lib)? {
+            if other.id != r.id && (canon.starts_with(&other.path) || other.path.starts_with(&canon)) {
+                bail!("{} overlaps existing source folder {}", canon.display(), other.path.display());
+            }
+        }
         let mut st = self.conn.prepare("SELECT rel_path, size FROM file WHERE root_id = ?1 AND status = 0 ORDER BY id LIMIT 50")?;
         let sample: Vec<(String, i64)> = st.query_map([r.id], |row| Ok((row.get(0)?, row.get(1)?)))?.collect::<Result<_, _>>()?;
         let found = sample
