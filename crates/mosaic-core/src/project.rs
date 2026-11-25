@@ -265,7 +265,7 @@ impl Project {
         if p.tiles.len() != p.grid.tiles() {
             bail!("project is inconsistent: {} tiles for a {}×{} grid", p.tiles.len(), p.grid.cols, p.grid.rows);
         }
-        if p.tiles.iter().any(|t| if t.is_empty() { p.outline.is_none() } else { t.photo as usize >= p.sources.len() }) {
+        if p.tiles.iter().any(|t| if t.is_empty() { !t.is_covered() && p.outline.is_none() } else { t.photo as usize >= p.sources.len() }) {
             bail!("project is inconsistent: tile refers to unknown source");
         }
         let crop_ok = |c: &[f32; 4]| c.iter().all(|v| v.is_finite()) && c[0] >= 0.0 && c[1] >= 0.0 && c[2] > 0.0 && c[3] > 0.0 && c[0] + c[2] <= 1.001 && c[1] + c[3] <= 1.001;
@@ -293,11 +293,36 @@ impl Project {
         }
         let g = &self.grid;
         let (tw, th) = g.tile_mm();
-        let c0 = ((x0 / tw).floor().max(0.0) as u32).min(g.cols);
-        let c1 = ((x1 / tw).ceil().max(0.0) as u32).min(g.cols);
-        let r0 = ((y0 / th).floor().max(0.0) as u32).min(g.rows);
+        let style = self.settings.grid_style;
+        let base_c0 = ((x0 / tw).floor().max(0.0) as u32).min(g.cols);
+        let base_c1 = ((x1 / tw).ceil().max(0.0) as u32).min(g.cols);
+        let base_r0 = ((y0 / th).floor().max(0.0) as u32).min(g.rows);
         let r1 = ((y1 / th).ceil().max(0.0) as u32).min(g.rows);
-        (r0..r1).any(|r| (c0..c1).any(|c| !self.tiles[(r * g.cols + c) as usize].is_empty()))
+        match style {
+            crate::matching::GridStyle::Regular => {
+                (base_r0..r1).any(|r| (base_c0..base_c1).any(|c| !self.tiles[(r * g.cols + c) as usize].is_empty()))
+            }
+            crate::matching::GridStyle::Quadtree => {
+                let c0 = base_c0.saturating_sub(1);
+                let r0 = base_r0.saturating_sub(1);
+                (r0..r1).any(|r| {
+                    (c0..base_c1).any(|c| {
+                        let t = &self.tiles[(r * g.cols + c) as usize];
+                        if t.is_empty() {
+                            return false;
+                        }
+                        let sp = t.span.max(1) as f64;
+                        let (tx0, ty0) = (c as f64 * tw, r as f64 * th);
+                        tx0 + sp * tw > x0 && tx0 < x1 && ty0 + sp * th > y0 && ty0 < y1
+                    })
+                })
+            }
+            crate::matching::GridStyle::Brick => {
+                let c0 = base_c0.saturating_sub(1);
+                let c1 = (base_c1 + 1).min(g.cols);
+                (base_r0..r1).any(|r| (c0..c1).any(|c| !self.tiles[(r * g.cols + c) as usize].is_empty()))
+            }
+        }
     }
 
     pub fn target_cells(&self) -> Result<Vec<Lab>> {

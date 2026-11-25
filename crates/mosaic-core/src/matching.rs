@@ -66,6 +66,69 @@ impl Method {
     }
 }
 
+/// Tile grid geometry.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GridStyle {
+    /// Standard uniform columns × rows grid.
+    #[default]
+    Regular,
+    /// Running-bond masonry stagger: odd rows are offset by half a tile.
+    Brick,
+    /// Multi-scale quadtree: smooth motif regions merge into 2×2 hero tiles
+    /// while detailed areas and faces stay 1×1.
+    Quadtree,
+}
+
+impl GridStyle {
+    pub const ALL: [GridStyle; 3] = [GridStyle::Regular, GridStyle::Brick, GridStyle::Quadtree];
+
+    pub fn parse(s: &str) -> Result<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "regular" | "grid" | "square" => Ok(Self::Regular),
+            "brick" | "stagger" | "staggered" | "offset" => Ok(Self::Brick),
+            "quadtree" | "multi-scale" | "multiscale" | "adaptive" => Ok(Self::Quadtree),
+            _ => bail!("unknown grid style '{s}' (regular, brick, quadtree)"),
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Regular => "regular",
+            Self::Brick => "brick",
+            Self::Quadtree => "quadtree",
+        }
+    }
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Regular => "Regular grid",
+            Self::Brick => "Brick offset",
+            Self::Quadtree => "Multi-scale (quadtree)",
+        }
+    }
+
+    pub fn is_regular(&self) -> bool {
+        *self == Self::Regular
+    }
+
+    /// Column pixel boundaries (`cols + 1` entries) for odd rows in Brick mode:
+    /// half-brick on left, `cols - 2` full bricks, half-brick on right.
+    pub fn brick_edges(cols: u64, width_px: u64) -> Vec<u64> {
+        if cols < 2 {
+            return (0..=cols).map(|i| crate::units::edge(i, cols.max(1), width_px)).collect();
+        }
+        let denom = (cols - 1) * 2;
+        let mut xs = Vec::with_capacity(cols as usize + 1);
+        xs.push(0);
+        for k in 1..cols {
+            xs.push(crate::units::edge(2 * k - 1, denom, width_px));
+        }
+        xs.push(width_px);
+        xs
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MatchSettings {
     pub method: Method,
@@ -116,6 +179,15 @@ pub struct MatchSettings {
     /// Row-major indices of tiles locked across photo reselection and swaps.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pinned_tiles: Vec<u32>,
+    /// Tile grid layout (regular, brick offset, or adaptive quadtree).
+    #[serde(default, skip_serializing_if = "GridStyle::is_regular")]
+    pub grid_style: GridStyle,
+    /// Tile border / grout gap in mm (0 = off, up to 3.0 mm).
+    #[serde(default, skip_serializing_if = "is_zero_f32")]
+    pub grout_mm: f32,
+    /// sRGB colour of tile borders / grout lines.
+    #[serde(default = "default_grout_color", skip_serializing_if = "is_default_grout_color")]
+    pub grout_color: [u8; 3],
 }
 
 fn default_motif_zoom() -> f32 {
@@ -132,6 +204,15 @@ fn is_default_motif_pan(p: &[f32; 2]) -> bool {
 }
 fn is_false(b: &bool) -> bool {
     !*b
+}
+fn is_zero_f32(v: &f32) -> bool {
+    *v == 0.0
+}
+fn default_grout_color() -> [u8; 3] {
+    [255, 255, 255]
+}
+fn is_default_grout_color(c: &[u8; 3]) -> bool {
+    *c == [255, 255, 255]
 }
 
 impl MatchSettings {
@@ -158,6 +239,9 @@ impl MatchSettings {
             focal_priority: false,
             excluded_photos: Vec::new(),
             pinned_tiles: Vec::new(),
+            grid_style: GridStyle::Regular,
+            grout_mm: 0.0,
+            grout_color: default_grout_color(),
         };
         if method == Method::Variety {
             s.repeat_penalty = 8.0;
@@ -189,6 +273,9 @@ impl MatchSettings {
         }
         if !self.motif_pan.iter().all(|v| v.is_finite() && (0.0..=1.0).contains(v)) {
             bail!("motif pan must be between 0 and 1");
+        }
+        if !self.grout_mm.is_finite() || !(0.0..=3.0).contains(&self.grout_mm) {
+            bail!("tile border / grout must be between 0 and 3 mm");
         }
         self.photo_filters.validate()?;
         for h in &self.must_include {
@@ -570,13 +657,29 @@ pub struct TileAssign {
     /// Lab offset applied at render time (all zero when colour correction is off).
     #[serde(rename = "a", default, skip_serializing_if = "is_zero3")]
     pub adjust: [f32; 3],
+    /// Grid cell span (`1` = normal 1×1 tile, `2` = 2×2 merged quadtree tile,
+    /// `0` = covered by a larger parent tile).
+    #[serde(rename = "s", default = "default_span", skip_serializing_if = "is_unit_span")]
+    pub span: u8,
+}
+
+fn default_span() -> u8 {
+    1
+}
+fn is_unit_span(s: &u8) -> bool {
+    *s == 1
 }
 
 impl TileAssign {
     /// Tile outside the mosaic outline: nothing is placed, background is shown.
-    pub const EMPTY: TileAssign = TileAssign { photo: u32::MAX, crop: [0.0; 4], adjust: [0.0; 3] };
+    pub const EMPTY: TileAssign = TileAssign { photo: u32::MAX, crop: [0.0; 4], adjust: [0.0; 3], span: 1 };
+    /// Sub-tile covered by a larger (2×2) quadtree tile anchored to its top-left.
+    pub const COVERED: TileAssign = TileAssign { photo: u32::MAX, crop: [0.0; 4], adjust: [0.0; 3], span: 0 };
     pub fn is_empty(&self) -> bool {
         self.photo == u32::MAX
+    }
+    pub fn is_covered(&self) -> bool {
+        self.photo == u32::MAX && self.span == 0
     }
 }
 
@@ -744,6 +847,155 @@ pub fn reselect_tiles_subset(
     match_selection(pool, target, grid, s, Some(&active), Some((previous, replace, allow_keep_old)), job)
 }
 
+/// Resample odd rows of `target` onto the half-shifted Brick column intervals
+/// so each staggered tile matches the exact part of the motif underneath it.
+fn brick_target(target: &Target) -> Target {
+    let cols = target.cols as usize;
+    let rows = target.rows as usize;
+    if cols < 2 || rows < 2 {
+        return target.clone();
+    }
+    let cells = target.cells();
+    let gw = cols * CELLS;
+    let mut out = target.clone();
+    // Fractional x boundaries on [0, gw] for odd-row bricks.
+    let edges_f: Vec<f32> = GridStyle::brick_edges(cols as u64, gw as u64 * 256)
+        .into_iter()
+        .map(|v| v as f32 / 256.0)
+        .collect();
+    for ty in (1..rows).step_by(2) {
+        for tx in 0..cols {
+            let bx0 = edges_f[tx];
+            let bx1 = edges_f[tx + 1];
+            let bw = (bx1 - bx0).max(1e-3);
+            let mut desc = [0.0f32; descriptor::DESC_DIM];
+            for cy in 0..CELLS {
+                let gy = ty * CELLS + cy;
+                for cx in 0..CELLS {
+                    let fx0 = bx0 + bw * (cx as f32 / CELLS as f32);
+                    let fx1 = bx0 + bw * ((cx + 1) as f32 / CELLS as f32);
+                    let gx0 = (fx0.floor() as usize).min(gw - 1);
+                    let gx1 = (fx1.ceil() as usize).clamp(gx0 + 1, gw);
+                    let mut sum = [0.0f32; 3];
+                    let mut wsum = 0.0f32;
+                    for gx in gx0..gx1 {
+                        let ov = (fx1.min((gx + 1) as f32) - fx0.max(gx as f32)).max(0.0);
+                        let wt = if ov > 0.0 { ov } else { 1.0 };
+                        let c = cells[gy * gw + gx];
+                        sum[0] += c[0] * wt;
+                        sum[1] += c[1] * wt;
+                        sum[2] += c[2] * wt;
+                        wsum += wt;
+                    }
+                    let inv = 1.0 / wsum.max(1e-6);
+                    let o = (cy * CELLS + cx) * 3;
+                    desc[o] = sum[0] * inv;
+                    desc[o + 1] = sum[1] * inv;
+                    desc[o + 2] = sum[2] * inv;
+                }
+            }
+            out.tiles[ty * cols + tx] = desc;
+        }
+    }
+    out
+}
+
+/// Merge smooth 2×2 blocks into single 2×2 hero tiles (Quadtree mode).
+/// Returns `(adjusted_target, adjusted_active, spans)` where `spans[i]` is
+/// `2` for a 2×2 anchor, `0` for its 3 covered siblings, and `1` otherwise.
+fn plan_quadtree(
+    target: &Target,
+    grid: &GridSpec,
+    active: &[bool],
+    previous: Option<&[TileAssign]>,
+) -> (Target, Vec<bool>, Vec<u8>) {
+    let cols = grid.cols as usize;
+    let rows = grid.rows as usize;
+    let n = cols * rows;
+    let mut adj_target = target.clone();
+    let mut adj_active = active.to_vec();
+    let mut spans = vec![1u8; n];
+    if cols < 2 || rows < 2 {
+        return (adj_target, adj_active, spans);
+    }
+
+    let merge_2x2_desc = |cells: &[Lab], gw: usize, bx: usize, by: usize| -> TileDesc {
+        let mut d = [0.0f32; descriptor::DESC_DIM];
+        let x0 = bx * CELLS;
+        let y0 = by * CELLS;
+        for cy in 0..CELLS {
+            for cx in 0..CELLS {
+                let mut sum = [0.0f32; 3];
+                for dy in 0..2 {
+                    for dx in 0..2 {
+                        let c = cells[(y0 + cy * 2 + dy) * gw + (x0 + cx * 2 + dx)];
+                        sum[0] += c[0];
+                        sum[1] += c[1];
+                        sum[2] += c[2];
+                    }
+                }
+                let o = (cy * CELLS + cx) * 3;
+                d[o] = sum[0] * 0.25;
+                d[o + 1] = sum[1] * 0.25;
+                d[o + 2] = sum[2] * 0.25;
+            }
+        }
+        d
+    };
+
+    let cells = target.cells();
+    let gw = cols * CELLS;
+
+    if let Some(prev) = previous {
+        for i in 0..n {
+            spans[i] = prev[i].span;
+            if prev[i].span == 2 {
+                let (bx, by) = (i % cols, i / cols);
+                if bx + 1 < cols && by + 1 < rows {
+                    adj_target.tiles[i] = merge_2x2_desc(&cells, gw, bx, by);
+                }
+            }
+        }
+        return (adj_target, adj_active, spans);
+    }
+
+    // Fresh match: merge 2×2 aligned blocks that are active, face-free, and smooth.
+    const SMOOTH_MAX_DE: f32 = 14.0;
+    let means: Vec<Lab> = target.tiles.iter().map(mean_lab).collect();
+    for by in (0..rows - 1).step_by(2) {
+        for bx in (0..cols - 1).step_by(2) {
+            let idx = [
+                by * cols + bx,
+                by * cols + bx + 1,
+                (by + 1) * cols + bx,
+                (by + 1) * cols + bx + 1,
+            ];
+            if !idx.iter().all(|&i| adj_active[i]) {
+                continue;
+            }
+            // Never merge tiles overlapping detected motif faces.
+            if idx.iter().any(|&i| target.tile_priority.get(i).copied().unwrap_or(0.0) >= 1.5) {
+                continue;
+            }
+            let avg = [
+                0.25 * (means[idx[0]][0] + means[idx[1]][0] + means[idx[2]][0] + means[idx[3]][0]),
+                0.25 * (means[idx[0]][1] + means[idx[1]][1] + means[idx[2]][1] + means[idx[3]][1]),
+                0.25 * (means[idx[0]][2] + means[idx[1]][2] + means[idx[2]][2] + means[idx[3]][2]),
+            ];
+            let max_de = idx.iter().map(|&i| de2(&means[i], &avg).sqrt()).fold(0.0f32, f32::max);
+            if max_de <= SMOOTH_MAX_DE {
+                adj_target.tiles[idx[0]] = merge_2x2_desc(&cells, gw, bx, by);
+                spans[idx[0]] = 2;
+                for &sib in &idx[1..] {
+                    spans[sib] = 0;
+                    adj_active[sib] = false;
+                }
+            }
+        }
+    }
+    (adj_target, adj_active, spans)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn match_selection(
     pool: &Pool,
@@ -759,10 +1011,32 @@ fn match_selection(
         return Err(anyhow::anyhow!("no source photos available").into());
     }
     let all = vec![true; grid.tiles()];
-    let active = active.unwrap_or(&all);
-    if active.len() != grid.tiles() {
+    let base_active = active.unwrap_or(&all);
+    if base_active.len() != grid.tiles() {
         return Err(anyhow::anyhow!("outline does not match the grid").into());
     }
+    let brick_t;
+    let quad_t;
+    let quad_active;
+    let spans: Vec<u8>;
+    let (eff_target, active) = match s.grid_style {
+        GridStyle::Regular => {
+            spans = previous.map(|(p, _, _)| p.iter().map(|t| t.span).collect()).unwrap_or_else(|| vec![1u8; grid.tiles()]);
+            (target, base_active)
+        }
+        GridStyle::Brick => {
+            spans = previous.map(|(p, _, _)| p.iter().map(|t| t.span).collect()).unwrap_or_else(|| vec![1u8; grid.tiles()]);
+            brick_t = brick_target(target);
+            (&brick_t, base_active)
+        }
+        GridStyle::Quadtree => {
+            let (qt, qa, sp) = plan_quadtree(target, grid, base_active, previous.map(|(p, _, _)| p));
+            quad_t = qt;
+            quad_active = qa;
+            spans = sp;
+            (&quad_t, quad_active.as_slice())
+        }
+    };
     let placed_tiles = active.iter().filter(|&&a| a).count();
     if placed_tiles == 0 {
         return Err(anyhow::anyhow!("the outline leaves no tile to fill").into());
@@ -810,10 +1084,10 @@ fn match_selection(
     stats.build_ms = ms(t0);
     job.check()?;
     let selected: Vec<bool> = active.iter().enumerate().map(|(i, &a)| a && previous.is_none_or(|(_, replace, _)| replace[i])).collect();
-    let lists = retrieve_selection(&cands, &retrieval, target, s, Some(&selected), Some(&old), &excluded_group, job)?;
+    let lists = retrieve_selection(&cands, &retrieval, eff_target, s, Some(&selected), Some(&old), &excluded_group, job)?;
     stats.retrieval_ms = ms(t0) - stats.build_ms;
     let t1 = Instant::now();
-    let tiles = assign(pool, &cands, &retrieval, target, grid, s, &selected, &lists, &old, &excluded_group, previous, &mut stats, job)?;
+    let tiles = assign(pool, &cands, &retrieval, eff_target, grid, s, &selected, &spans, &lists, &old, &excluded_group, previous, &mut stats, job)?;
     stats.assign_ms = ms(t1);
     Ok((tiles, stats))
 }
@@ -882,6 +1156,7 @@ fn assign(
     grid: &GridSpec,
     s: &MatchSettings,
     active: &[bool],
+    spans: &[u8],
     lists: &[Vec<(u32, f32)>],
     old: &[u32],
     excluded_group: &[bool],
@@ -1117,7 +1392,7 @@ fn assign(
     let mut cost_sum = 0f64;
     for t in 0..n {
         if placed[t] == u32::MAX {
-            out.push(TileAssign::EMPTY);
+            out.push(if spans[t] == 0 { TileAssign::COVERED } else { TileAssign::EMPTY });
             continue;
         }
         let c = &cands[placed[t] as usize];
@@ -1140,7 +1415,11 @@ fn assign(
         } else {
             [0.0; 3]
         };
-        out.push(if let Some((tiles, _, _)) = previous.filter(|_| !active[t]) { tiles[t] } else { TileAssign { photo: c.photo, crop: c.crop, adjust } });
+        out.push(if let Some((tiles, _, _)) = previous.filter(|_| !active[t]) {
+            tiles[t]
+        } else {
+            TileAssign { photo: c.photo, crop: c.crop, adjust, span: spans[t].max(1) }
+        });
     }
     let mut per_group = vec![0u32; pool.group_count as usize];
     for p in placed.iter().filter(|&&p| p != u32::MAX) {

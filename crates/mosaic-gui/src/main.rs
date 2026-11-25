@@ -17,7 +17,7 @@ use mosaic_core::decode::{decode_file, resize_crop};
 use mosaic_core::indexer::{update_library, walk_images, IndexOptions, IMAGE_EXTENSIONS};
 use mosaic_core::job::{is_cancelled, Job};
 use mosaic_core::layout::{PrintSettings, PAPERS};
-use mosaic_core::matching::{motif_crop_rect, GridSpec, MatchError, MatchSettings, Method};
+use mosaic_core::matching::{motif_crop_rect, GridSpec, GridStyle, MatchError, MatchSettings, Method};
 use mosaic_core::pdf::{export_pdf, plan_pdf, plan_pdf_auto_orientation, PdfPlan};
 use mosaic_core::photo_index::{friendly_date, write_index_pdf, TilePlace};
 use mosaic_core::pool::Pool;
@@ -315,6 +315,9 @@ fn read_settings(ui: &AppWindow, st: &State) -> Result<(GridSpec, MatchSettings)
     s.motif_zoom = ui.get_motif_zoom().clamp(1.0, 5.0);
     s.motif_pan = [ui.get_motif_pan_x().clamp(0.0, 1.0), ui.get_motif_pan_y().clamp(0.0, 1.0)];
     s.focal_priority = ui.get_focal_priority();
+    s.grid_style = GridStyle::ALL[ui.get_grid_style_index().clamp(0, 2) as usize];
+    s.grout_mm = ui.get_grout_mm().clamp(0.0, 3.0);
+    s.grout_color = GROUT_COLORS[ui.get_grout_color_index().clamp(0, 3) as usize];
     s.color_correction = ui.get_color_correction();
     s.motif_blend = ui.get_motif_blend();
     let text = ui.get_hidden_message();
@@ -331,6 +334,7 @@ fn read_settings(ui: &AppWindow, st: &State) -> Result<(GridSpec, MatchSettings)
 
 const SHAPES: [Shape; 5] = [Shape::Ellipse, Shape::Heart, Shape::Hexagon, Shape::Diamond, Shape::Star];
 const BACKGROUNDS: [[u8; 3]; 3] = [[255, 255, 255], [0, 0, 0], [220, 220, 220]];
+const GROUT_COLORS: [[u8; 3]; 4] = [[255, 255, 255], [20, 20, 24], [215, 218, 224], [244, 238, 224]];
 
 fn read_outline(ui: &AppWindow) -> Result<Option<Outline>> {
     let i = ui.get_shape_index();
@@ -672,6 +676,9 @@ fn show_project(ui: &AppWindow, s: &mut State, p: Project, buf: SharedPixelBuffe
         ui.set_motif_pan_x(p.settings.motif_pan[0]);
         ui.set_motif_pan_y(p.settings.motif_pan[1]);
         ui.set_focal_priority(p.settings.focal_priority);
+        ui.set_grid_style_index(GridStyle::ALL.iter().position(|g| *g == p.settings.grid_style).unwrap_or(0) as i32);
+        ui.set_grout_mm(p.settings.grout_mm);
+        ui.set_grout_color_index(GROUT_COLORS.iter().position(|c| *c == p.settings.grout_color).unwrap_or(0) as i32);
         if p.settings.motif_zoom > 1.01 || (p.settings.motif_pan[0] - 0.5).abs() > 0.01 || (p.settings.motif_pan[1] - 0.5).abs() > 0.01 {
             ui.set_show_motif_crop(true);
         }
@@ -877,7 +884,24 @@ fn show_picked_place(ui: &AppWindow, s: &State, go: bool) {
     let proj = &z.project;
     let (cols, rows) = (proj.grid.cols.max(1) as usize, proj.grid.rows.max(1) as usize);
     let (fw, fh) = (1.0 / cols as f32, 1.0 / rows as f32);
-    let mark = |t: usize| TileMark { u: (t % cols) as f32 * fw, v: (t / cols) as f32 * fh, w: fw, h: fh, current: t == cur };
+    let odd_edges = (proj.settings.grid_style == GridStyle::Brick && cols >= 2).then(|| {
+        GridStyle::brick_edges(cols as u64, 100_000).into_iter().map(|v| v as f32 / 100_000.0).collect::<Vec<_>>()
+    });
+    let tile_uv = |t: usize| -> (f32, f32, f32, f32) {
+        let (tx, ty) = (t % cols, t / cols);
+        let span = proj.tiles.get(t).map(|a| a.span.max(1) as usize).unwrap_or(1);
+        let (u, w) = match &odd_edges {
+            Some(ox) if ty % 2 == 1 => (ox[tx], ox[(tx + span).min(cols)] - ox[tx]),
+            _ => (tx as f32 * fw, (span as f32 * fw).min(1.0 - tx as f32 * fw)),
+        };
+        let v = ty as f32 * fh;
+        let h = (span as f32 * fh).min(1.0 - v);
+        (u, v, w, h)
+    };
+    let mark = |t: usize| {
+        let (u, v, w, h) = tile_uv(t);
+        TileMark { u, v, w, h, current: t == cur }
+    };
     let mut marks: Vec<TileMark> = p.tiles.iter().filter(|&&t| t != cur).take(MAX_MARKS).map(|&t| mark(t)).collect();
     marks.push(mark(cur));
     ui.set_tile_marks(ModelRc::new(VecModel::from(marks)));
@@ -892,8 +916,9 @@ fn show_picked_place(ui: &AppWindow, s: &State, go: bool) {
     info.pinned = pinned;
     ui.set_tile_info(info);
     if go {
-        ui.set_preview_goto_u((cur % cols) as f32 * fw + fw / 2.0);
-        ui.set_preview_goto_v((cur / cols) as f32 * fh + fh / 2.0);
+        let (u, v, w, h) = tile_uv(cur);
+        ui.set_preview_goto_u(u + w / 2.0);
+        ui.set_preview_goto_v(v + h / 2.0);
         ui.set_preview_goto_n(ui.get_preview_goto_n() + 1);
     }
 }
@@ -2373,6 +2398,9 @@ mod tests {
         ui.set_motif_pan_x(0.25);
         ui.set_motif_pan_y(0.75);
         ui.set_focal_priority(true);
+        ui.set_grid_style_index(2);
+        ui.set_grout_mm(0.8);
+        ui.set_grout_color_index(1);
         let mut st = super::State::default();
         let hero_hex = super::hex(&[0xab; 32]);
         let excl_hex = super::hex(&[0xcd; 32]);
@@ -2397,6 +2425,9 @@ mod tests {
         assert!((settings.motif_pan[0] - 0.25).abs() < 1e-4);
         assert!((settings.motif_pan[1] - 0.75).abs() < 1e-4);
         assert!(settings.focal_priority);
+        assert_eq!(settings.grid_style, super::GridStyle::Quadtree);
+        assert!((settings.grout_mm - 0.8).abs() < 1e-4);
+        assert_eq!(settings.grout_color, super::GROUT_COLORS[1]);
         let selections = Rc::new(Cell::new(0));
         let count = selections.clone();
         ui.on_new_selection(move || count.set(count.get() + 1));
@@ -2473,7 +2504,7 @@ mod tests {
             settings: MatchSettings::for_method(Method::Classic),
             descriptor_version: mosaic_core::descriptor::DESCRIPTOR_VERSION,
             sources: vec![SourceRef { hash, width: 12000, height: 7200 }],
-            tiles: vec![TileAssign { photo: 0, crop: [0.0, 0.0, 1.0, 1.0], adjust: [0.0; 3] }],
+            tiles: vec![TileAssign { photo: 0, crop: [0.0, 0.0, 1.0, 1.0], adjust: [0.0; 3], span: 1 }],
             target_cells: String::new(),
             stats: Default::default(),
             outline: None,

@@ -989,6 +989,9 @@ export component AppWindow inherits Window {
     in-out property <bool> crop-offsets: false;
     in-out property <bool> face-crop: true;
     in-out property <bool> focal-priority: false;
+    in-out property <int> grid-style-index: 0;
+    in-out property <float> grout-mm: 0;
+    in-out property <int> grout-color-index: 0;
     in-out property <int> excluded-photo-count: 0;
     in-out property <int> pinned-tile-count: 0;
     in-out property <int> seed: 1;
@@ -1949,6 +1952,30 @@ export component AppWindow inherits Window {
                                         TipCheck { text: "Try off-centre crops"; tip: "The app also tries to cut each photo away from its centre, if this gives a better match. This is slower."; checked <=> root.crop-offsets; toggled => { root.changed(); } }
                                         TipCheck { text: "Keep faces & subjects in frame"; tip: "The app finds faces and main subjects (pets, landmarks, objects) when scanning your photos, and frames each tile crop around them instead of cutting them off."; checked <=> root.face-crop; toggled => { root.changed(); } }
                                         TipCheck { text: "Prioritise faces & detail"; tip: "Match tiles covering faces and sharp edges in your picture first so key details get the best photos before reuse limits fill up."; checked <=> root.focal-priority; toggled => { root.changed(); } }
+                                        Field {
+                                            label: "Tile layout";
+                                            tip: "Regular grid uses uniform tiles. Brick offset staggers odd rows by half a tile. Multi-scale (quadtree) merges smooth background areas into larger 2×2 hero tiles while keeping faces and detail sharp.";
+                                            ComboBox {
+                                                model: ["Regular grid", "Brick offset", "Multi-scale (quadtree)"];
+                                                current-index <=> root.grid-style-index;
+                                                selected => { root.changed(); }
+                                            }
+                                        }
+                                        Field {
+                                            label: "Tile border / grout";
+                                            tip: "Add a crisp border between tiles (in mm, 0 = off).";
+                                            Slider { minimum: 0; maximum: 2.0; value <=> root.grout-mm; changed => { root.changed(); } }
+                                            Text { text: round(root.grout-mm * 10) / 10 + " mm"; min-width: 44px; color: Theme.fg; vertical-alignment: center; }
+                                        }
+                                        if root.grout-mm > 0.01: Field {
+                                            label: "Border colour";
+                                            tip: "Colour of the grout lines between tiles.";
+                                            ComboBox {
+                                                model: ["White", "Black", "Light grey", "Warm cream"];
+                                                current-index <=> root.grout-color-index;
+                                                selected => { root.changed(); }
+                                            }
+                                        }
                                         if root.excluded-photo-count > 0: HorizontalLayout {
                                             spacing: 8px;
                                             alignment: start;

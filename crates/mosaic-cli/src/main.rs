@@ -188,6 +188,15 @@ pub struct MatchArgs {
     /// Match tiles covering motif faces and high-detail edges before flat regions.
     #[arg(long)]
     pub focal_priority: bool,
+    /// Tile grid layout: regular | brick | quadtree.
+    #[arg(long, default_value = "regular")]
+    pub grid_style: String,
+    /// Tile border / grout gap in mm (0 = off, up to 3.0).
+    #[arg(long, default_value_t = 0.0)]
+    pub grout_mm: f32,
+    /// Tile border / grout colour, as #rrggbb.
+    #[arg(long, default_value = "#ffffff")]
+    pub grout_color: String,
 }
 
 #[derive(Args)]
@@ -420,6 +429,9 @@ pub fn settings_from(m: &MatchArgs) -> Result<(GridSpec, MatchSettings)> {
     s.motif_zoom = m.motif_zoom;
     s.motif_pan = [m.motif_pan_x, m.motif_pan_y];
     s.focal_priority = m.focal_priority;
+    s.grid_style = mosaic_core::matching::GridStyle::parse(&m.grid_style)?;
+    s.grout_mm = m.grout_mm;
+    s.grout_color = parse_hex_color(&m.grout_color)?;
     s.validate()?;
     Ok((grid, s))
 }

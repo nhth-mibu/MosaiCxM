@@ -123,7 +123,10 @@ pub struct Renderer<'a> {
     project: &'a Project,
     source: &'a dyn TileSource,
     xs: Vec<u64>,
+    odd_xs: Option<Vec<u64>>,
     ys: Vec<u64>,
+    grout_px: u64,
+    grout_color: [u8; 3],
     cache: Mutex<Cache>,
     blend: Option<(f32, Vec<[u8; 3]>)>,
 }
@@ -138,8 +141,25 @@ pub struct RenderStats {
 impl<'a> Renderer<'a> {
     pub fn new(project: &'a Project, spec: RasterSpec, source: &'a dyn TileSource, cache_budget: u64) -> Result<Self> {
         let g = &project.grid;
-        let xs = (0..=g.cols as u64).map(|i| edge(i, g.cols as u64, spec.width_px)).collect();
-        let ys = (0..=g.rows as u64).map(|i| edge(i, g.rows as u64, spec.height_px)).collect();
+        let xs: Vec<u64> = (0..=g.cols as u64).map(|i| edge(i, g.cols as u64, spec.width_px)).collect();
+        let odd_xs = if project.settings.grid_style == crate::matching::GridStyle::Brick {
+            Some(crate::matching::GridStyle::brick_edges(g.cols as u64, spec.width_px))
+        } else {
+            None
+        };
+        let ys: Vec<u64> = (0..=g.rows as u64).map(|i| edge(i, g.rows as u64, spec.height_px)).collect();
+        let min_tile_px = xs
+            .windows(2)
+            .map(|w| w[1] - w[0])
+            .min()
+            .unwrap_or(1)
+            .min(ys.windows(2).map(|w| w[1] - w[0]).min().unwrap_or(1));
+        let grout_px = if project.settings.grout_mm > 0.0 && min_tile_px >= 4 {
+            let raw = (project.settings.grout_mm as f64 * spec.width_px as f64 / g.width_mm).round() as u64;
+            raw.max(1).min(min_tile_px / 3)
+        } else {
+            0
+        };
         let blend = if project.settings.motif_blend > 0.0 {
             Some((project.settings.motif_blend, project.target_cells()?.into_iter().map(lab_to_srgb8).collect()))
         } else {
@@ -150,7 +170,10 @@ impl<'a> Renderer<'a> {
             project,
             source,
             xs,
+            odd_xs,
             ys,
+            grout_px,
+            grout_color: project.settings.grout_color,
             cache: Mutex::new(Cache { map: HashMap::new(), bytes: 0, budget: cache_budget, clock: 0, hits: 0, misses: 0 }),
             blend,
         })
@@ -170,18 +193,41 @@ impl<'a> Renderer<'a> {
     pub fn max_tile_bytes(&self) -> u64 {
         let mw = self.xs.windows(2).map(|w| w[1] - w[0]).max().unwrap_or(1);
         let mh = self.ys.windows(2).map(|w| w[1] - w[0]).max().unwrap_or(1);
-        mw * mh * 3
+        let scale = if self.project.settings.grid_style == crate::matching::GridStyle::Quadtree { 4 } else { 1 };
+        mw * mh * 3 * scale
     }
 
+    /// Outer cell rectangle of tile `i` in global pixels (before grout inset).
     pub fn tile_rect(&self, i: usize) -> (u64, u64, u64, u64) {
-        let c = self.project.grid.cols as usize;
-        let (tx, ty) = (i % c, i / c);
-        (self.xs[tx], self.ys[ty], self.xs[tx + 1], self.ys[ty + 1])
+        let cols = self.project.grid.cols as usize;
+        let rows = self.project.grid.rows as usize;
+        let (tx, ty) = (i % cols, i / cols);
+        let span = self.project.tiles[i].span.max(1) as usize;
+        let xs = match &self.odd_xs {
+            Some(ox) if ty % 2 == 1 => ox.as_slice(),
+            _ => self.xs.as_slice(),
+        };
+        (xs[tx], self.ys[ty], xs[(tx + span).min(cols)], self.ys[(ty + span).min(rows)])
+    }
+
+    /// Inner photo rectangle of tile `i` after subtracting grout borders.
+    fn photo_rect(&self, i: usize) -> (u64, u64, u64, u64) {
+        let (tx0, ty0, tx1, ty1) = self.tile_rect(i);
+        if self.grout_px == 0 {
+            return (tx0, ty0, tx1, ty1);
+        }
+        let gl = self.grout_px / 2;
+        let gr = self.grout_px - gl;
+        let gx0 = tx0.saturating_add(gl).min(tx1.saturating_sub(1));
+        let gy0 = ty0.saturating_add(gl).min(ty1.saturating_sub(1));
+        let gx1 = tx1.saturating_sub(gr).max(gx0 + 1);
+        let gy1 = ty1.saturating_sub(gr).max(gy0 + 1);
+        (gx0, gy0, gx1, gy1)
     }
 
     fn key(&self, i: usize) -> PixKey {
         let t = &self.project.tiles[i];
-        let (x0, y0, x1, y1) = self.tile_rect(i);
+        let (x0, y0, x1, y1) = self.photo_rect(i);
         PixKey {
             photo: t.photo,
             crop: t.crop.map(f32::to_bits),
@@ -207,13 +253,21 @@ impl<'a> Renderer<'a> {
     }
 
     fn tiles_in(&self, x0: u64, y0: u64, x1: u64, y1: u64) -> Vec<usize> {
-        let c0 = self.xs.partition_point(|&e| e <= x0).saturating_sub(1);
-        let c1 = self.xs.partition_point(|&e| e < x1).min(self.xs.len() - 1);
         let r0 = self.ys.partition_point(|&e| e <= y0).saturating_sub(1);
+        let r0 = if self.project.settings.grid_style == crate::matching::GridStyle::Quadtree { r0.saturating_sub(1) } else { r0 };
         let r1 = self.ys.partition_point(|&e| e < y1).min(self.ys.len() - 1);
         let cols = self.project.grid.cols as usize;
         let mut v = Vec::new();
         for r in r0..r1 {
+            let xs = match &self.odd_xs {
+                Some(ox) if r % 2 == 1 => ox.as_slice(),
+                _ => self.xs.as_slice(),
+            };
+            let mut c0 = xs.partition_point(|&e| e <= x0).saturating_sub(1);
+            if self.project.settings.grid_style == crate::matching::GridStyle::Quadtree {
+                c0 = c0.saturating_sub(1);
+            }
+            let c1 = xs.partition_point(|&e| e < x1).min(xs.len() - 1);
             for c in c0..c1 {
                 v.push(r * cols + c);
             }
@@ -229,7 +283,7 @@ impl<'a> Renderer<'a> {
         let (x1, y1) = (x0 + w, y0 + h);
         let all = self.tiles_in(x0, y0, x1, y1);
         let tiles: Vec<usize> = all.iter().copied().filter(|&i| !self.project.tiles[i].is_empty()).collect();
-        let has_empty = tiles.len() != all.len();
+        let has_empty = all.iter().any(|&i| self.project.tiles[i].is_empty() && !self.project.tiles[i].is_covered());
         // Render missing pixmaps in parallel, in bounded batches.
         for batch in tiles.chunks(256) {
             job.check()?;
@@ -257,7 +311,18 @@ impl<'a> Renderer<'a> {
                     Some(p) => p.clone(),
                     None => self.cache.lock().unwrap().get(&k).ok_or_else(|| anyhow!("cache miss"))?,
                 };
-                let (tx0, ty0, tx1, ty1) = self.tile_rect(i);
+                if self.grout_px > 0 {
+                    let (cx0, cy0, cx1, cy1) = self.tile_rect(i);
+                    let (gx0, gy0, gx1, gy1) = (cx0.max(x0), cy0.max(y0), cx1.min(x1), cy1.min(y1));
+                    for y in gy0..gy1 {
+                        let row = (y - y0) as usize * w as usize;
+                        for x in gx0..gx1 {
+                            let o = (row + (x - x0) as usize) * 3;
+                            buf[o..o + 3].copy_from_slice(&self.grout_color);
+                        }
+                    }
+                }
+                let (tx0, ty0, tx1, ty1) = self.photo_rect(i);
                 let (ix0, iy0, ix1, iy1) = (tx0.max(x0), ty0.max(y0), tx1.min(x1), ty1.min(y1));
                 if ix0 >= ix1 || iy0 >= iy1 {
                     continue;
@@ -279,7 +344,7 @@ impl<'a> Renderer<'a> {
             self.apply_blend(&mut buf, x0, y0, w, h, *alpha, cells);
             if has_empty {
                 // The motif is not blended outside the outline.
-                for &i in all.iter().filter(|&&i| self.project.tiles[i].is_empty()) {
+                for &i in all.iter().filter(|&&i| self.project.tiles[i].is_empty() && !self.project.tiles[i].is_covered()) {
                     let (tx0, ty0, tx1, ty1) = self.tile_rect(i);
                     let (ix0, iy0, ix1, iy1) = (tx0.max(x0), ty0.max(y0), tx1.min(x1), ty1.min(y1));
                     for y in iy0..iy1 {
