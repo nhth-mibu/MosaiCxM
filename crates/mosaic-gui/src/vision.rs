@@ -279,6 +279,81 @@ impl DocumentClassifier for Config {
     fn is_document(&self, image: &RgbImage, job: &Job) -> Result<bool> { self.request(image, job, &self.url()) }
 }
 
+fn parse_tags_text(raw: &str) -> Result<Vec<String>> {
+    let trimmed = raw.trim();
+    let candidate = if let (Some(a), Some(b)) = (trimmed.find('{'), trimmed.rfind('}')) {
+        &trimmed[a..=b]
+    } else if let (Some(a), Some(b)) = (trimmed.find('['), trimmed.rfind(']')) {
+        &trimmed[a..=b]
+    } else {
+        trimmed
+    };
+    let parsed: Value = serde_json::from_str(candidate).context("the vision model did not return valid JSON tags")?;
+    let arr = parsed
+        .as_array()
+        .or_else(|| parsed["tags"].as_array())
+        .ok_or_else(|| anyhow!("the vision model response must include a JSON \"tags\" array"))?;
+    let mut out = Vec::new();
+    for v in arr {
+        if let Some(s) = v.as_str() {
+            let norm = s.trim().to_lowercase();
+            if !norm.is_empty() && !out.contains(&norm) {
+                out.push(norm);
+            }
+        }
+    }
+    Ok(out)
+}
+
+impl mosaic_core::filters::SemanticTagger for Config {
+    fn cache_key(&self) -> String {
+        format!("tags:1:{}:{}:{}", self.provider.name(), self.endpoint, self.model)
+    }
+
+    fn tag_image(&self, image: &RgbImage, job: &Job) -> Result<Vec<String>> {
+        job.check()?;
+        let url = self.chat_url()?;
+        let small = mosaic_core::filters::bounded_image(image);
+        let bytes = decode::encode_jpeg(&small, 85)?;
+        let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+        let payload = json!({
+            "model": self.model,
+            "stream": false,
+            "temperature": 0.1,
+            "max_tokens": 160,
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "List 5 to 10 concise lowercase English tags describing the subjects, setting, season, mood, and colours in this photo (for example: beach, sunset, ocean, dog, family, mountains, winter, food). Reply ONLY with JSON: {\"tags\":[\"tag1\",\"tag2\"]}."},
+                    {"type": "image_url", "image_url": {"url": format!("data:image/jpeg;base64,{encoded}")}}
+                ]
+            }]
+        });
+        let tls = ureq::tls::TlsConfig::builder().root_certs(ureq::tls::RootCerts::PlatformVerifier).build();
+        let agent: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(Duration::from_secs(90))).max_redirects(0).http_status_as_error(false).tls_config(tls).build().into();
+        let mut request = agent.post(&url).header("Content-Type", "application/json");
+        if !self.key.is_empty() {
+            request = request.header("Authorization", format!("Bearer {}", self.key));
+        }
+        let mut response = request.send(serde_json::to_vec(&payload)?).with_context(|| format!("{} image tagging failed; check the server, model and API key", self.provider.name()))?;
+        if !response.status().is_success() {
+            let status = response.status().as_u16();
+            let body = response.body_mut().with_config().limit(16 * 1024).read_to_string().unwrap_or_default();
+            let detail = server_detail(&body, &self.key).unwrap_or_else(|| "The server returned no readable error explanation.".into());
+            bail!("{} image tagging failed (HTTP {status}). {detail}", self.provider.name());
+        }
+        let body = response.body_mut().read_to_string()?;
+        job.check()?;
+        let v: Value = serde_json::from_str(&body).context("the model server returned invalid JSON")?;
+        let message = &v["choices"][0]["message"];
+        if !message["refusal"].is_null() && message["refusal"].as_str().map_or(true, |s| !s.trim().is_empty()) {
+            bail!("the vision model refused to tag this photo");
+        }
+        let text = message["content"].as_str().ok_or_else(|| anyhow!("the vision model returned no tags"))?;
+        parse_tags_text(text)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -437,6 +512,27 @@ mod tests {
         let config = Config::new(Provider::Ollama, &format!("http://{addr}"), "test-svg", "").unwrap();
         let svg = config.generate_svg("moon silhouette", &Job::default()).unwrap();
         assert!(svg.starts_with("<svg") && svg.ends_with("</svg>"));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn semantic_tagger_parses_json_tags() {
+        use mosaic_core::filters::SemanticTagger;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let (_headers, body) = read_request(&mut socket);
+            assert_eq!(body["model"], "test-tagger");
+            let content = "```json\n{\"tags\":[\"Beach\",\"sunset\",\"ocean\",\"beach\"]}\n```";
+            let response = json!({"choices":[{"message":{"content": content}}]}).to_string();
+            write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", response.len(), response).unwrap();
+        });
+        let config = Config::new(Provider::Ollama, &format!("http://{addr}"), "test-tagger", "").unwrap();
+        let img = RgbImage::from_pixel(32, 24, image::Rgb([200, 120, 40]));
+        let tags = config.tag_image(&img, &Job::default()).unwrap();
+        assert_eq!(tags, vec!["beach", "sunset", "ocean"]);
         server.join().unwrap();
     }
 }

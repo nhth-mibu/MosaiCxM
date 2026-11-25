@@ -11,13 +11,21 @@ use anyhow::{bail, Result};
 use image::RgbImage;
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 /// Optional image judgement. Implementations must return an error on failed,
 /// refused or malformed responses; those must never be cached as "photo".
 pub trait DocumentClassifier {
     fn cache_key(&self) -> String;
     fn is_document(&self, image: &RgbImage, job: &Job) -> Result<bool>;
+}
+
+/// Optional semantic image tagger (vision LLM or local tagger).
+/// Tags are cached permanently in SQLite per `(content_hash, cache_key)` so
+/// photos are never re-tagged across sessions.
+pub trait SemanticTagger {
+    fn cache_key(&self) -> String;
+    fn tag_image(&self, image: &RgbImage, job: &Job) -> Result<Vec<String>>;
 }
 
 pub const DOCUMENT_VERSION: u32 = 2;
@@ -80,6 +88,10 @@ pub struct PhotoFilters {
     /// Keep photos whose EXIF lens name contains this text (case-insensitive).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lens: Option<String>,
+    /// Keep photos matching a semantic theme query against cached AI tags and folder/file names
+    /// (e.g. "beach sunset, ocean" or "dogs outdoors").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub theme_query: Option<String>,
 }
 
 fn non_empty(o: &Option<String>) -> Option<&str> {
@@ -125,8 +137,16 @@ impl PhotoFilters {
             || non_empty(&self.lens).is_some()
     }
 
+    pub fn has_theme_filter(&self) -> bool {
+        non_empty(&self.theme_query).is_some()
+    }
+
     pub fn is_default(&self) -> bool {
-        self.people == People::Any && self.colour == Colour::Any && !self.skip_documents && !self.has_exif_filter()
+        self.people == People::Any
+            && self.colour == Colour::Any
+            && !self.skip_documents
+            && !self.has_exif_filter()
+            && !self.has_theme_filter()
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -147,6 +167,12 @@ impl PhotoFilters {
     pub fn apply_with_classifier(&self, pool: &Pool, cat: &Catalog, libs: &[i64], merge: bool, classifier: Option<&dyn DocumentClassifier>, job: &Job) -> Result<Pool> {
         self.validate()?;
         let exif_allowed = if self.has_exif_filter() { Some(exif_matching_hashes(cat, libs, self)?) } else { None };
+        let theme_q = non_empty(&self.theme_query);
+        let (photo_tags, path_hints) = if theme_q.is_some() {
+            (Some(cat.all_photo_tags(libs)?), Some(photo_path_hints(cat, libs)?))
+        } else {
+            (None, None)
+        };
         let screenshots = if self.skip_documents { screenshot_hashes(cat, libs)? } else { HashSet::new() };
         let offline_key = format!("offline:{DOCUMENT_VERSION}");
         let cache_key = if self.skip_documents {
@@ -169,6 +195,13 @@ impl PhotoFilters {
             if !self.allows(p) { continue; }
             if let Some(allowed) = &exif_allowed {
                 if !allowed.contains(&p.hash) { continue; }
+            }
+            if let Some(q) = theme_q {
+                let tags = photo_tags.as_ref().and_then(|m| m.get(&p.hash)).map(|v| v.as_slice()).unwrap_or(&[]);
+                let hint = path_hints.as_ref().and_then(|m| m.get(&p.hash)).map(|s| s.as_str());
+                if !matches_theme(q, tags, hint) {
+                    continue;
+                }
             }
             if self.skip_documents {
                 if screenshots.contains(&p.hash) { continue; }
@@ -208,7 +241,7 @@ impl PhotoFilters {
             if unreadable > 0 {
                 bail!("cannot inspect unchanged original photos for the document filter; reconnect or rescan your folders, or turn off Skip likely documents/screenshots");
             }
-            bail!("no photos match these filters; relax the people, colour, date/camera or document filters, or add more photos");
+            bail!("no photos match these filters; relax the people, colour, date/camera, theme or document filters, or add more photos");
         }
         job.check()?;
         let mut out = Pool { photos, group_count: 0 };
@@ -362,6 +395,157 @@ fn likely_document(img: &RgbImage) -> bool {
     density > 0.002 && density < 0.12
 }
 
+/// Tags every photo in `pool` not yet cached under `tagger.cache_key()`,
+/// persisting results in SQLite `photo_tags`. Returns the count newly tagged.
+pub fn tag_untagged_pool(cat: &Catalog, pool: &Pool, libs: &[i64], tagger: &dyn SemanticTagger, job: &Job) -> Result<usize> {
+    let key = tagger.cache_key();
+    let total = pool.photos.len() as u64;
+    let mut newly_tagged = 0usize;
+    for (i, p) in pool.photos.iter().enumerate() {
+        job.check()?;
+        if cat.photo_tags(&p.hash, Some(&key))?.is_some() {
+            if i % 64 == 0 {
+                job.report("tagging photos with AI (reusing cached tags)", i as u64, total);
+            }
+            continue;
+        }
+        job.report("tagging photos with AI", i as u64, total);
+        let img = match analysis_image(cat, p, libs) {
+            Ok(img) => img,
+            Err(_) => {
+                let Some(thumb) = cat.thumb(&p.hash)? else { continue };
+                let Ok(dec) = decode::decode_bytes(&thumb, None) else { continue };
+                dec.image
+            }
+        };
+        job.check()?;
+        let tags = tagger.tag_image(&img, job)?;
+        cat.put_photo_tags(&p.hash, &key, &tags)?;
+        newly_tagged += 1;
+    }
+    job.report("tagging photos with AI", total, total);
+    Ok(newly_tagged)
+}
+
+fn photo_path_hints(cat: &Catalog, libs: &[i64]) -> Result<HashMap<Hash, String>> {
+    if libs.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let ids = libs.iter().map(i64::to_string).collect::<Vec<_>>().join(",");
+    let mut stmt = cat.conn.prepare(&format!(
+        "SELECT f.content_hash, r.path, f.rel_path FROM file f JOIN root r ON r.id = f.root_id WHERE f.status = 0 AND r.library_id IN ({ids})"
+    ))?;
+    let rows = stmt.query_map([], |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))?;
+    let mut out: HashMap<Hash, String> = HashMap::new();
+    for row in rows {
+        let (hb, root, rel) = row?;
+        let Ok(h) = hb.try_into() else { continue };
+        let root_name = std::path::Path::new(&root).file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+        let entry = out.entry(h).or_default();
+        if !entry.is_empty() {
+            entry.push(' ');
+        }
+        entry.push_str(&root_name);
+        entry.push(' ');
+        entry.push_str(&rel);
+    }
+    Ok(out)
+}
+
+const STOP_WORDS: &[&str] = &[
+    "a", "an", "the", "of", "in", "on", "at", "to", "for", "with", "and", "by", "from", "photos", "photo", "pictures", "picture", "only", "my",
+];
+
+const SYNONYM_GROUPS: &[&[&str]] = &[
+    &["beach", "ocean", "sea", "coast", "shore", "sand", "wave", "waves", "surf", "seaside"],
+    &["sunset", "sunrise", "golden", "dusk", "dawn", "twilight", "evening"],
+    &["mountain", "mountains", "hill", "hills", "peak", "alpine", "hike", "hiking", "trail"],
+    &["forest", "woods", "tree", "trees", "woodland", "jungle", "nature", "foliage"],
+    &["snow", "winter", "ice", "ski", "skiing", "frost", "snowy"],
+    &["dog", "dogs", "puppy", "puppies", "canine", "pet", "pets"],
+    &["cat", "cats", "kitten", "kittens", "feline", "pet", "pets"],
+    &["bird", "birds", "wildlife", "animal", "animals"],
+    &["flower", "flowers", "blossom", "bloom", "garden", "rose", "tulip", "floral"],
+    &["city", "urban", "street", "building", "buildings", "skyline", "architecture", "downtown"],
+    &["food", "meal", "dinner", "lunch", "breakfast", "restaurant", "cafe", "coffee", "cake", "dessert"],
+    &["car", "cars", "vehicle", "road", "drive", "motorcycle", "bike", "bicycle"],
+    &["night", "stars", "moon", "fireworks", "neon", "dark"],
+    &["family", "kids", "child", "children", "baby", "wedding", "party", "celebration", "portrait", "people"],
+    &["water", "lake", "river", "waterfall", "pond", "pool", "boat", "sailing"],
+    &["autumn", "fall", "leaves", "harvest"],
+    &["summer", "vacation", "holiday", "travel", "trip", "sunny"],
+];
+
+fn tokenize_words(text: &str) -> Vec<String> {
+    text.to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn stem_matches(token: &str, needle: &str) -> bool {
+    if token == needle || token.contains(needle) {
+        return true;
+    }
+    if needle.len() >= 4 {
+        let stripped = needle.strip_suffix('s').unwrap_or(needle);
+        if token == stripped || token.starts_with(stripped) {
+            return true;
+        }
+    }
+    false
+}
+
+fn term_matches_haystack(term: &str, words: &[String], full: &str) -> bool {
+    if words.iter().any(|w| stem_matches(w, term)) || full.contains(term) {
+        return true;
+    }
+    for group in SYNONYM_GROUPS {
+        if group.iter().any(|&g| g == term || stem_matches(g, term)) {
+            if group.iter().any(|&syn| words.iter().any(|w| stem_matches(w, syn))) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Matches a natural-language theme query against a photo's cached AI tags and
+/// optional folder/filename hint.
+///
+/// Comma-separated or ` or `-separated clauses act as OR alternatives; words
+/// within a clause act as AND terms (with photographic synonym expansion).
+pub fn matches_theme(query: &str, tags: &[String], path_hint: Option<&str>) -> bool {
+    let q = query.trim().to_lowercase();
+    if q.is_empty() {
+        return true;
+    }
+    let mut full = tags.join(" ").to_lowercase();
+    if let Some(p) = path_hint {
+        full.push(' ');
+        full.push_str(&p.to_lowercase());
+    }
+    let words = tokenize_words(&full);
+    if words.is_empty() {
+        return false;
+    }
+    let normalized = q.replace(" or ", ",");
+    for clause in normalized.split(',') {
+        let terms: Vec<String> = tokenize_words(clause)
+            .into_iter()
+            .filter(|w| !STOP_WORDS.contains(&w.as_str()))
+            .collect();
+        if terms.is_empty() {
+            continue;
+        }
+        if terms.iter().all(|t| term_matches_haystack(t, &words, &full)) {
+            return true;
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -461,5 +645,17 @@ mod tests {
         assert!(!likely_document(&RgbImage::from_pixel(512, 512, image::Rgb([225, 228, 233]))));
         let bounded = bounded_image(&RgbImage::new(2000, 1000));
         assert_eq!(bounded.dimensions(), (1024, 512), "model previews must keep the photo's aspect ratio");
+    }
+
+    #[test]
+    fn theme_query_matches_tags_synonyms_and_paths() {
+        let beach_tags = vec!["ocean".into(), "golden hour".into(), "waves".into()];
+        assert!(matches_theme("beach sunset", &beach_tags, None));
+        assert!(matches_theme("mountain, beach", &beach_tags, None));
+        assert!(matches_theme("snow or coast", &beach_tags, None));
+        assert!(!matches_theme("snow mountains", &beach_tags, None));
+        // Works offline via folder/filename hints even before AI tagging.
+        assert!(matches_theme("dogs outdoors", &[], Some("2024_puppy_park/outdoors_01.jpg")));
+        assert!(!matches_theme("cat indoors", &[], Some("2024_puppy_park/outdoors_01.jpg")));
     }
 }

@@ -479,6 +479,69 @@ fn story_card_and_palette_coach_detect_missing_color_family() {
 }
 
 #[test]
+fn semantic_tagging_cache_theme_filter_and_content_aware_matching() {
+    use mosaic_core::filters::{tag_untagged_pool, PhotoFilters, SemanticTagger};
+    use std::cell::Cell;
+
+    let e = env();
+    let dir = e.root.join("mix");
+    std::fs::create_dir_all(&dir).unwrap();
+    // 2 warm photos (tagged beach/sunset), 2 cool photos (tagged mountain/snow).
+    for i in 0..4u8 {
+        let c = if i < 2 { [220, 120 + i * 20, 40] } else { [50, 90 + i * 15, 200] };
+        RgbImage::from_pixel(120, 90, image::Rgb(c)).save(dir.join(format!("img_{i}.jpg"))).unwrap();
+    }
+    let lib = e.cat.create_library("mix").unwrap();
+    e.cat.add_root(lib, &dir).unwrap();
+    update_library(&e.cat, lib, &opts(), &Job::default()).unwrap();
+    let pool = Pool::load(&e.cat, &[lib], true).unwrap();
+    assert_eq!(pool.photos.len(), 4);
+
+    struct MockTagger { calls: Cell<usize> }
+    impl SemanticTagger for MockTagger {
+        fn cache_key(&self) -> String { "mock:tagger:v1".into() }
+        fn tag_image(&self, image: &RgbImage, _: &Job) -> anyhow::Result<Vec<String>> {
+            self.calls.set(self.calls.get() + 1);
+            let p = image.get_pixel(0, 0).0;
+            if p[0] > p[2] {
+                Ok(vec!["ocean".into(), "golden hour".into(), "sand".into()])
+            } else {
+                Ok(vec!["alpine".into(), "winter".into(), "peak".into()])
+            }
+        }
+    }
+
+    let tagger = MockTagger { calls: Cell::new(0) };
+    let tagged1 = tag_untagged_pool(&e.cat, &pool, &[lib], &tagger, &Job::default()).unwrap();
+    assert_eq!(tagged1, 4);
+    assert_eq!(tagger.calls.get(), 4);
+    assert_eq!(e.cat.tagged_count(&[lib]).unwrap(), 4);
+    // Second pass reuses cached SQLite tags and makes zero model calls.
+    let tagged2 = tag_untagged_pool(&e.cat, &pool, &[lib], &tagger, &Job::default()).unwrap();
+    assert_eq!(tagged2, 0);
+    assert_eq!(tagger.calls.get(), 4);
+
+    // Synonym theme query ("beach sunset") matches the 2 warm photos tagged ocean/golden hour/sand.
+    let f = PhotoFilters { theme_query: Some("beach sunset".into()), ..Default::default() };
+    let filtered = f.apply(&pool, &e.cat, &[lib], true, &Job::default()).unwrap();
+    assert_eq!(filtered.photos.len(), 2);
+
+    // Content-aware matching prefers face photos on high-priority face tiles.
+    e.cat.put_faces(&pool.photos[0].hash, &[mosaic_core::faces::Face { rect: [0.25, 0.2, 0.4, 0.4], score: 0.99 }]).unwrap();
+    let pool_with_face = Pool::load(&e.cat, &[lib], true).unwrap();
+    let grid = GridSpec::new(200.0, 200.0, 2, 2).unwrap();
+    let mpath = e.root.join("motif.png");
+    motif(&mpath);
+    let (mut target, mref) = load_target(&mpath, &grid).unwrap();
+    target.tile_priority = vec![2.5, 0.2, 0.2, 0.2];
+    let mut s = MatchSettings::for_method(Method::Classic);
+    s.content_aware = true;
+    let proj = Project::create(&pool_with_face, libraries_refs(&e.cat, &[lib]).unwrap(), &target, mref, grid, s, &Job::default()).unwrap();
+    assert!(proj.settings.content_aware);
+    assert_eq!(proj.tiles.len(), 4);
+}
+
+#[test]
 fn document_decisions_ignore_old_cache_and_separate_models_and_failures() {
     use mosaic_core::filters::{DocumentClassifier, PhotoFilters};
     use std::cell::Cell;

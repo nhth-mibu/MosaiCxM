@@ -188,6 +188,9 @@ pub struct MatchSettings {
     /// sRGB colour of tile borders / grout lines.
     #[serde(default = "default_grout_color", skip_serializing_if = "is_default_grout_color")]
     pub grout_color: [u8; 3],
+    /// Prefer portrait/face photos in motif face tiles and scenic/non-portrait photos outside faces.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub content_aware: bool,
 }
 
 fn default_motif_zoom() -> f32 {
@@ -242,6 +245,7 @@ impl MatchSettings {
             grid_style: GridStyle::Regular,
             grout_mm: 0.0,
             grout_color: default_grout_color(),
+            content_aware: false,
         };
         if method == Method::Variety {
             s.repeat_penalty = 8.0;
@@ -1307,8 +1311,10 @@ fn assign(
                 }
             }
         }
+        let face_tile = target.tile_priority.get(t).copied().unwrap_or(0.0) >= 1.5;
         let cost_of = |ci: u32, base: f32, uses: &[u32]| -> Option<f32> {
-            let g = cands[ci as usize].group;
+            let cand = &cands[ci as usize];
+            let g = cand.group;
             if Some(g) == old_group {
                 return None;
             }
@@ -1319,6 +1325,14 @@ fn assign(
             for &(ng, w) in &neigh {
                 if ng == g {
                     c += w;
+                }
+            }
+            if s.content_aware {
+                let has_face = !pool.photos[cand.photo as usize].faces.is_empty();
+                if face_tile && has_face {
+                    c = (c - 2.5).max(0.0);
+                } else if !face_tile && !has_face {
+                    c = (c - 1.0).max(0.0);
                 }
             }
             Some(c)

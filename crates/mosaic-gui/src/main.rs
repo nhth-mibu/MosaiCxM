@@ -256,6 +256,16 @@ fn refresh_libraries(ui: &AppWindow, st: &mut State) -> Result<()> {
         }
         .into(),
     );
+    let used_ids: Vec<i64> = used.iter().map(|l| l.id).collect();
+    let tagged = cat.tagged_count(&used_ids).unwrap_or(0) as u64;
+    ui.set_tagged_summary(
+        if tagged == 0 {
+            String::new()
+        } else {
+            format!("{} / {} AI-tagged", thousands(tagged), thousands(photos))
+        }
+        .into(),
+    );
     Ok(())
 }
 
@@ -311,12 +321,14 @@ fn read_settings(ui: &AppWindow, st: &State) -> Result<(GridSpec, MatchSettings)
         date_to: opt_str(ui.get_date_to()),
         camera: opt_str(ui.get_camera_filter()),
         lens: opt_str(ui.get_lens_filter()),
+        theme_query: opt_str(ui.get_theme_filter()),
     };
     s.must_include = st.must_include.iter().map(|(h, _)| h.clone()).collect();
     s.excluded_photos = st.excluded_photos.clone();
     s.motif_zoom = ui.get_motif_zoom().clamp(1.0, 5.0);
     s.motif_pan = [ui.get_motif_pan_x().clamp(0.0, 1.0), ui.get_motif_pan_y().clamp(0.0, 1.0)];
     s.focal_priority = ui.get_focal_priority();
+    s.content_aware = ui.get_content_aware();
     s.grid_style = GridStyle::ALL[ui.get_grid_style_index().clamp(0, 2) as usize];
     s.grout_mm = ui.get_grout_mm().clamp(0.0, 3.0);
     s.grout_color = GROUT_COLORS[ui.get_grout_color_index().clamp(0, 3) as usize];
@@ -675,6 +687,7 @@ fn show_project(ui: &AppWindow, s: &mut State, p: Project, buf: SharedPixelBuffe
         ui.set_date_to(p.settings.photo_filters.date_to.as_deref().unwrap_or("").into());
         ui.set_camera_filter(p.settings.photo_filters.camera.as_deref().unwrap_or("").into());
         ui.set_lens_filter(p.settings.photo_filters.lens.as_deref().unwrap_or("").into());
+        ui.set_theme_filter(p.settings.photo_filters.theme_query.as_deref().unwrap_or("").into());
         let libs: Vec<i64> = p.libraries.iter().map(|l| l.id).collect();
         let cat = Catalog::open(&s.data_dir).ok();
         s.must_include = p.settings.must_include.iter().map(|hx| {
@@ -686,13 +699,14 @@ fn show_project(ui: &AppWindow, s: &mut State, p: Project, buf: SharedPixelBuffe
             (hx.clone(), label)
         }).collect();
         sync_must_include(ui, s);
-        if p.settings.photo_filters.has_exif_filter() || !s.must_include.is_empty() {
+        if p.settings.photo_filters.has_exif_filter() || p.settings.photo_filters.has_theme_filter() || !s.must_include.is_empty() {
             ui.set_show_extra_filters(true);
         }
         ui.set_motif_zoom(p.settings.motif_zoom);
         ui.set_motif_pan_x(p.settings.motif_pan[0]);
         ui.set_motif_pan_y(p.settings.motif_pan[1]);
         ui.set_focal_priority(p.settings.focal_priority);
+        ui.set_content_aware(p.settings.content_aware);
         ui.set_grid_style_index(GridStyle::ALL.iter().position(|g| *g == p.settings.grid_style).unwrap_or(0) as i32);
         ui.set_grout_mm(p.settings.grout_mm);
         ui.set_grout_color_index(GROUT_COLORS.iter().position(|c| *c == p.settings.grout_color).unwrap_or(0) as i32);
@@ -2210,6 +2224,34 @@ fn main() -> Result<()> {
         });
     }
     {
+        let (w, s) = (ui.as_weak(), st.clone());
+        ui.on_tag_photos_ai(move || {
+            let ui = w.unwrap();
+            if ui.get_busy() { return; }
+            let config = match read_classifier(&ui) {
+                Ok(c) => c,
+                Err(e) => return report_error(&ui, anyhow!("configure an AI model in Step 1 first: {e:#}")),
+            };
+            let (dd, libs) = {
+                let guard = s.lock().unwrap();
+                match selected_libs(&guard) {
+                    Ok(libs) => (guard.data_dir.clone(), libs),
+                    Err(e) => return report_error(&ui, e),
+                }
+            };
+            run_job(&ui, &s, "Tagging photos with AI", move |job, _| {
+                let cat = Catalog::open(&dd)?;
+                let pool = Pool::load(&cat, &libs, false)?;
+                let newly = mosaic_core::filters::tag_untagged_pool(&cat, &pool, &libs, &config, job)?;
+                let total_tagged = cat.tagged_count(&libs)?;
+                Ok(Box::new(move |ui: &AppWindow, st: &mut State| {
+                    let _ = refresh_libraries(ui, st);
+                    ui.set_status(format!("AI tagging complete: {newly} newly tagged ({total_tagged} total cached).").into());
+                }))
+            });
+        });
+    }
+    {
         let w = ui.as_weak();
         ui.on_save_story_card(move || {
             let ui = w.unwrap();
@@ -2524,10 +2566,12 @@ mod tests {
         ui.set_date_to("2024".into());
         ui.set_camera_filter("Fuji".into());
         ui.set_lens_filter("35mm".into());
+        ui.set_theme_filter("beach sunset".into());
         ui.set_motif_zoom(2.0);
         ui.set_motif_pan_x(0.25);
         ui.set_motif_pan_y(0.75);
         ui.set_focal_priority(true);
+        ui.set_content_aware(true);
         ui.set_grid_style_index(2);
         ui.set_grout_mm(0.8);
         ui.set_grout_color_index(1);
@@ -2547,6 +2591,7 @@ mod tests {
                 date_to: Some("2024".into()),
                 camera: Some("Fuji".into()),
                 lens: Some("35mm".into()),
+                theme_query: Some("beach sunset".into()),
             }
         );
         assert_eq!(settings.must_include, vec![hero_hex]);
@@ -2555,6 +2600,7 @@ mod tests {
         assert!((settings.motif_pan[0] - 0.25).abs() < 1e-4);
         assert!((settings.motif_pan[1] - 0.75).abs() < 1e-4);
         assert!(settings.focal_priority);
+        assert!(settings.content_aware);
         assert_eq!(settings.grid_style, super::GridStyle::Quadtree);
         assert!((settings.grout_mm - 0.8).abs() < 1e-4);
         assert_eq!(settings.grout_color, super::GROUT_COLORS[1]);
