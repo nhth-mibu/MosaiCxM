@@ -178,6 +178,68 @@ impl Config {
         job.check()?;
         self.parse(serde_json::from_str(&body).context("the model server returned invalid JSON")?)
     }
+
+    fn chat_url(&self) -> Result<String> {
+        if self.provider == Provider::Jev {
+            bail!("{} only supports binary image checks; choose Ollama, LM Studio, vLLM or OpenAI for text and SVG generation", self.provider.name());
+        }
+        Ok(format!("{}/chat/completions", self.endpoint))
+    }
+
+    /// Send an OpenAI-compatible text chat completion request using the configured model.
+    pub fn chat_text(&self, system: &str, user: &str, max_tokens: u32, job: &Job) -> Result<String> {
+        let url = self.chat_url()?;
+        self.chat_text_at(system, user, max_tokens, job, &url)
+    }
+
+    pub(crate) fn chat_text_at(&self, system: &str, user: &str, max_tokens: u32, job: &Job, url: &str) -> Result<String> {
+        job.check()?;
+        let payload = json!({
+            "model": self.model,
+            "stream": false,
+            "temperature": 0.4,
+            "max_tokens": max_tokens,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user}
+            ]
+        });
+        let tls = ureq::tls::TlsConfig::builder().root_certs(ureq::tls::RootCerts::PlatformVerifier).build();
+        let agent: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(Duration::from_secs(90))).max_redirects(0).http_status_as_error(false).tls_config(tls).build().into();
+        let mut request = agent.post(url).header("Content-Type", "application/json");
+        if !self.key.is_empty() {
+            request = request.header("Authorization", format!("Bearer {}", self.key));
+        }
+        let mut response = request.send(serde_json::to_vec(&payload)?).with_context(|| format!("{} request failed; check the server, model and API key", self.provider.name()))?;
+        if !response.status().is_success() {
+            let status = response.status().as_u16();
+            let body = response.body_mut().with_config().limit(16 * 1024).read_to_string().unwrap_or_default();
+            let detail = server_detail(&body, &self.key).unwrap_or_else(|| "The server returned no readable error explanation.".into());
+            bail!("{} request failed (HTTP {status}). {detail}", self.provider.name());
+        }
+        let body = response.body_mut().read_to_string()?;
+        job.check()?;
+        let v: Value = serde_json::from_str(&body).context("the model server returned invalid JSON")?;
+        let message = &v["choices"][0]["message"];
+        if !message["refusal"].is_null() && message["refusal"].as_str().map_or(true, |s| !s.trim().is_empty()) {
+            bail!("the model refused this request");
+        }
+        let text = message["content"].as_str().ok_or_else(|| anyhow!("the model returned no text"))?;
+        Ok(text.trim().to_string())
+    }
+
+    /// Ask the configured LLM for a bold, solid vector silhouette `<svg>` matching `prompt`,
+    /// then validate and sanitize it so `resvg` can render it safely.
+    pub fn generate_svg(&self, prompt: &str, job: &Job) -> Result<String> {
+        let prompt = prompt.trim();
+        if prompt.is_empty() {
+            bail!("describe the silhouette shape you want (for example: cat silhouette, guitar, pine tree)");
+        }
+        let system = "You design clean, bold, single-silhouette SVG masks for photo mosaics. Reply ONLY with a valid standalone <svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 512 512\"> element using solid black (#000000) filled shapes (<path>, <circle>, <ellipse>, <polygon>, <rect>) centered and filling roughly 80% of the canvas. No text, no scripts, no external links, no background rectangle.";
+        let user = format!("Create a recognizable solid silhouette SVG mask for: {prompt}");
+        let raw = self.chat_text(system, &user, 1024, job)?;
+        mosaic_core::shape::sanitize_generated_svg(&raw)
+    }
 }
 
 pub fn load_preferences(cat: &Catalog) -> Result<Option<(i32, String, String)>> {
@@ -352,5 +414,23 @@ mod tests {
         assert!(config.parse(json!({"choices":[{"message":{"refusal":"refused","content":"{\"document\":false}"}}]})).is_err());
         assert!(!config.parse(json!({"choices":[{"message":{"refusal":"","content":"{\"document\":false}"}}]})).unwrap());
         assert!(!config.parse(json!({"choices":[{"message":{"content":"{\"document\":false}"}}]})).unwrap());
+    }
+
+    #[test]
+    fn generate_svg_sanitizes_and_validates_model_output() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let (_headers, body) = read_request(&mut socket);
+            assert_eq!(body["model"], "test-svg");
+            let svg = "```svg\n<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 512 512\"><circle cx=\"256\" cy=\"256\" r=\"200\" fill=\"#000000\"/></svg>\n```";
+            let response = json!({"choices":[{"message":{"content": svg}}]}).to_string();
+            write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", response.len(), response).unwrap();
+        });
+        let config = Config::new(Provider::Ollama, &format!("http://{addr}"), "test-svg", "").unwrap();
+        let svg = config.generate_svg("moon silhouette", &Job::default()).unwrap();
+        assert!(svg.starts_with("<svg") && svg.ends_with("</svg>"));
+        server.join().unwrap();
     }
 }
