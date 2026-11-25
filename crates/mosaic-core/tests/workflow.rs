@@ -385,6 +385,74 @@ fn camera_raw_files_index_match_and_export() {
 }
 
 #[test]
+fn brick_quadtree_and_grout_render_seamlessly() {
+    use mosaic_core::matching::GridStyle;
+    use mosaic_core::render::{Renderer, ThumbSource};
+    use mosaic_core::units::RasterSpec;
+
+    let (e, lib) = indexed_env(24);
+    let pool = Pool::load(&e.cat, &[lib], true).unwrap();
+    let grid = GridSpec::new(200.0, 200.0, 4, 4).unwrap();
+    // Smooth top half (should merge into 2x2 quadtree tiles), high-contrast bottom half (stays 1x1).
+    let mut img = RgbImage::new(160, 160);
+    for (x, y, p) in img.enumerate_pixels_mut() {
+        *p = if y < 80 {
+            image::Rgb([40, 120, 210])
+        } else if ((x / 40) + (y / 40)) % 2 == 0 {
+            image::Rgb([250, 250, 250])
+        } else {
+            image::Rgb([10, 10, 10])
+        };
+    }
+    let mpath = e.root.join("quad_motif.png");
+    img.save(&mpath).unwrap();
+    let (target, mref) = load_target(&mpath, &grid).unwrap();
+
+    // 1. Quadtree + grout
+    let mut qs = MatchSettings::for_method(Method::Classic);
+    qs.grid_style = GridStyle::Quadtree;
+    qs.grout_mm = 2.0;
+    qs.grout_color = [12, 34, 56];
+    let qproj = Project::create(&pool, libraries_refs(&e.cat, &[lib]).unwrap(), &target, mref.clone(), grid, qs, &Job::default()).unwrap();
+    assert!(qproj.tiles.iter().any(|t| t.span == 2), "smooth top half should produce 2x2 merged hero tiles");
+    assert!(qproj.tiles.iter().any(|t| t.is_covered()), "merged 2x2 tiles should mark covered siblings");
+    let qfile = e.root.join("quad.json");
+    qproj.save(&qfile).unwrap();
+    let qreloaded = Project::load(&qfile).unwrap();
+    assert_eq!(qreloaded.settings.grid_style, GridStyle::Quadtree);
+
+    // Verify seam-free rendering across vertical split + grout colour presence.
+    let spec = RasterSpec::with_pixels(200.0, 200.0, 80, 80).unwrap();
+    let thumbs = ThumbSource::load_for(&e.cat, &qreloaded.source_hashes().unwrap()).unwrap();
+    let r = Renderer::new(&qreloaded, spec, &thumbs, 64 << 20).unwrap();
+    let full = r.render_region(0, 0, 80, 80, &Job::default()).unwrap();
+    let top = r.render_region(0, 0, 80, 37, &Job::default()).unwrap();
+    let bot = r.render_region(0, 37, 80, 43, &Job::default()).unwrap();
+    let mut stitched = Vec::with_capacity(full.len());
+    stitched.extend_from_slice(&top);
+    stitched.extend_from_slice(&bot);
+    assert_eq!(full, stitched, "quadtree + grout region splits must be bit-identical");
+    assert!(full.chunks_exact(3).any(|px| px == [12, 34, 56]), "grout colour pixels must be rendered");
+
+    // 2. Brick offset
+    let mut bs = MatchSettings::for_method(Method::Classic);
+    bs.grid_style = GridStyle::Brick;
+    bs.grout_mm = 1.5;
+    bs.grout_color = [255, 255, 255];
+    let bproj = Project::create(&pool, libraries_refs(&e.cat, &[lib]).unwrap(), &target, mref, grid, bs, &Job::default()).unwrap();
+    let bthumbs = ThumbSource::load_for(&e.cat, &bproj.source_hashes().unwrap()).unwrap();
+    let br = Renderer::new(&bproj, spec, &bthumbs, 64 << 20).unwrap();
+    let bfull = br.render_region(0, 0, 80, 80, &Job::default()).unwrap();
+    let bleft = br.render_region(0, 0, 35, 80, &Job::default()).unwrap();
+    let bright = br.render_region(35, 0, 45, 80, &Job::default()).unwrap();
+    for y in 0..80 {
+        let row_full = &bfull[y * 80 * 3..(y + 1) * 80 * 3];
+        assert_eq!(&row_full[..35 * 3], &bleft[y * 35 * 3..(y + 1) * 35 * 3]);
+        assert_eq!(&row_full[35 * 3..], &bright[y * 45 * 3..(y + 1) * 45 * 3]);
+    }
+}
+
+#[test]
 fn document_decisions_ignore_old_cache_and_separate_models_and_failures() {
     use mosaic_core::filters::{DocumentClassifier, PhotoFilters};
     use std::cell::Cell;

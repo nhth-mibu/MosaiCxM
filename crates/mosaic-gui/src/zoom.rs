@@ -84,8 +84,30 @@ pub fn tile_at(p: &Project, u: f64, v: f64) -> Option<usize> {
         return None;
     }
     let (cols, rows) = (p.grid.cols as usize, p.grid.rows as usize);
-    let i = ((v * rows as f64) as usize).min(rows - 1) * cols + ((u * cols as f64) as usize).min(cols - 1);
-    p.tiles.get(i).filter(|t| !t.is_empty()).map(|_| i)
+    let ty = ((v * rows as f64) as usize).min(rows - 1);
+    let tx = if p.settings.grid_style == mosaic_core::matching::GridStyle::Brick && ty % 2 == 1 && cols >= 2 {
+        ((u * (cols - 1) as f64 + 0.5).floor() as usize).min(cols - 1)
+    } else {
+        ((u * cols as f64) as usize).min(cols - 1)
+    };
+    let i = ty * cols + tx;
+    let t = p.tiles.get(i)?;
+    if !t.is_empty() {
+        return Some(i);
+    }
+    if t.is_covered() {
+        for (dx, dy) in [(1usize, 0usize), (0, 1), (1, 1)] {
+            if let (Some(px), Some(py)) = (tx.checked_sub(dx), ty.checked_sub(dy)) {
+                let pi = py * cols + px;
+                if let Some(pt) = p.tiles.get(pi) {
+                    if !pt.is_empty() && pt.span >= 2 {
+                        return Some(pi);
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 struct Cached {
