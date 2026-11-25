@@ -444,6 +444,7 @@ fn trial(cat: &Catalog, c: &MotifCandidate, ld: &Loaded, pool: &Pool, grid: &Gri
         (*grid, s.clone())
     };
     ts.must_include.clear();
+    ts.pinned_tiles.clear();
     // Motif at trial resolution: a reduced decode of the original when available.
     let img = match &c.source {
         MotifSource::File(p) => decode::decode_file(p, Some((tg.cols.max(tg.rows) as usize * CELLS) as u32))?.image,

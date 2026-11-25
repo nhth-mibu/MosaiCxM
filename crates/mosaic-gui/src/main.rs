@@ -17,12 +17,12 @@ use mosaic_core::decode::{decode_file, resize_crop};
 use mosaic_core::indexer::{update_library, walk_images, IndexOptions, IMAGE_EXTENSIONS};
 use mosaic_core::job::{is_cancelled, Job};
 use mosaic_core::layout::{PrintSettings, PAPERS};
-use mosaic_core::matching::{GridSpec, MatchError, MatchSettings, Method};
+use mosaic_core::matching::{motif_crop_rect, GridSpec, MatchError, MatchSettings, Method};
 use mosaic_core::pdf::{export_pdf, plan_pdf, plan_pdf_auto_orientation, PdfPlan};
 use mosaic_core::photo_index::{friendly_date, write_index_pdf, TilePlace};
 use mosaic_core::pool::Pool;
 use mosaic_core::message::{letter_tiles, HiddenMessage, Tone, MIN_LETTER_TILES};
-use mosaic_core::project::{check_sources, libraries_refs, load_target, output_stats, shutter_label, write_manifest, write_output_stats, Counted, OutputStats, Range, Project};
+use mosaic_core::project::{check_sources, libraries_refs, load_target_with_crop, output_stats, shutter_label, write_manifest, write_output_stats, Counted, OutputStats, Range, Project};
 use mosaic_core::recommend::{recommend, MotifCandidate, MotifSource, RecommendOptions};
 use mosaic_core::render::{render_preview, FileSource};
 use mosaic_core::shape::{Outline, Shape};
@@ -86,6 +86,8 @@ struct State {
     picked_gen: u64,
     /// Photos guaranteed to appear in the mosaic: (hex content hash, display name).
     must_include: Vec<(String, String)>,
+    /// Hex hashes of photos excluded from this mosaic.
+    excluded_photos: Vec<String>,
 }
 
 struct CachedPool {
@@ -309,6 +311,10 @@ fn read_settings(ui: &AppWindow, st: &State) -> Result<(GridSpec, MatchSettings)
         lens: opt_str(ui.get_lens_filter()),
     };
     s.must_include = st.must_include.iter().map(|(h, _)| h.clone()).collect();
+    s.excluded_photos = st.excluded_photos.clone();
+    s.motif_zoom = ui.get_motif_zoom().clamp(1.0, 5.0);
+    s.motif_pan = [ui.get_motif_pan_x().clamp(0.0, 1.0), ui.get_motif_pan_y().clamp(0.0, 1.0)];
+    s.focal_priority = ui.get_focal_priority();
     s.color_correction = ui.get_color_correction();
     s.motif_blend = ui.get_motif_blend();
     let text = ui.get_hidden_message();
@@ -412,7 +418,12 @@ fn update_grid_info(ui: &AppWindow, st: &State) {
                     Err(e) => t += &format!(" Hidden message: {e:#}."),
                 }
             }
-            if let Some(h) = crop_hint(ui.get_motif_aspect() as f64, g.width_mm / g.height_mm) {
+            let ma = ui.get_motif_aspect();
+            if ma > 0.0 {
+                let rect = motif_crop_rect(ma, (g.width_mm / g.height_mm) as f32, s.motif_zoom, s.motif_pan);
+                ui.set_motif_crop_rect(ModelRc::new(VecModel::from(rect.to_vec())));
+            }
+            if let Some(h) = crop_hint(ma as f64, g.width_mm / g.height_mm) {
                 t += &h;
             }
             ui.set_grid_info(t.into());
@@ -657,6 +668,13 @@ fn show_project(ui: &AppWindow, s: &mut State, p: Project, buf: SharedPixelBuffe
         if p.settings.photo_filters.has_exif_filter() || !s.must_include.is_empty() {
             ui.set_show_extra_filters(true);
         }
+        ui.set_motif_zoom(p.settings.motif_zoom);
+        ui.set_motif_pan_x(p.settings.motif_pan[0]);
+        ui.set_motif_pan_y(p.settings.motif_pan[1]);
+        ui.set_focal_priority(p.settings.focal_priority);
+        if p.settings.motif_zoom > 1.01 || (p.settings.motif_pan[0] - 0.5).abs() > 0.01 || (p.settings.motif_pan[1] - 0.5).abs() > 0.01 {
+            ui.set_show_motif_crop(true);
+        }
         ui.set_color_correction(p.settings.color_correction);
         ui.set_motif_blend(p.settings.motif_blend);
         let hm = p.settings.hidden_message.as_ref();
@@ -691,6 +709,16 @@ fn show_project(ui: &AppWindow, s: &mut State, p: Project, buf: SharedPixelBuffe
     }
     if let Some(w) = Sharpness::of(&p, None).warning(VIEW_DISTANCES[0]) {
         rep += &format!("\n{w}");
+    }
+    s.excluded_photos = p.settings.excluded_photos.clone();
+    ui.set_excluded_photo_count(s.excluded_photos.len() as i32);
+    ui.set_pinned_tile_count(p.settings.pinned_tiles.len() as i32);
+    if !p.settings.pinned_tiles.is_empty() || !p.settings.excluded_photos.is_empty() {
+        rep += &format!(
+            "\nPinned tiles: {}. Excluded photos: {}.",
+            p.settings.pinned_tiles.len(),
+            p.settings.excluded_photos.len()
+        );
     }
     ui.set_match_report(rep.into());
     s.preview_w = buf.width();
@@ -854,11 +882,14 @@ fn show_picked_place(ui: &AppWindow, s: &State, go: bool) {
     marks.push(mark(cur));
     ui.set_tile_marks(ModelRc::new(VecModel::from(marks)));
     let place = TilePlace::of(proj, cur);
+    let cur_proj = s.project.as_deref().unwrap_or(proj);
+    let pinned = cur_proj.is_pinned(cur);
     let mut info = ui.get_tile_info();
     info.uses = if p.tiles.len() == 1 { "Used on 1 tile".into() } else { format!("Used on {} tiles. This is tile {} of {}.", p.tiles.len(), p.at + 1, p.tiles.len()).into() };
-    info.place = place.short().into();
+    info.place = if pinned { format!("{} · Pinned", place.short()).into() } else { place.short().into() };
     info.distance = place.distance().into();
     info.more = p.tiles.len() > 1;
+    info.pinned = pinned;
     ui.set_tile_info(info);
     if go {
         ui.set_preview_goto_u((cur % cols) as f32 * fw + fw / 2.0);
@@ -1500,11 +1531,25 @@ fn main() -> Result<()> {
             let ui = w.unwrap();
             if let Some(p) = rfd::FileDialog::new().set_title("Choose the picture for your mosaic").add_filter("Images", &["jpg", "jpeg", "png", "webp", "tif", "tiff"]).pick_file() {
                 show_motif(&ui, &p);
+                ui.set_motif_zoom(1.0);
+                ui.set_motif_pan_x(0.5);
+                ui.set_motif_pan_y(0.5);
                 match_size_to_motif(&ui);
                 mark_stale(&ui);
                 ui.set_open_step(3);
                 update_grid_info(&ui, &s.lock().unwrap());
             }
+        });
+    }
+    {
+        let (w, s) = (ui.as_weak(), st.clone());
+        ui.on_reset_motif_crop(move || {
+            let ui = w.unwrap();
+            ui.set_motif_zoom(1.0);
+            ui.set_motif_pan_x(0.5);
+            ui.set_motif_pan_y(0.5);
+            mark_stale(&ui);
+            update_grid_info(&ui, &s.lock().unwrap());
         });
     }
     {
@@ -1604,6 +1649,9 @@ fn main() -> Result<()> {
             let p = s.lock().unwrap().suggestion_paths.get(i as usize).cloned().flatten();
             if let Some(p) = p {
                 show_motif(&ui, &p);
+                ui.set_motif_zoom(1.0);
+                ui.set_motif_pan_x(0.5);
+                ui.set_motif_pan_y(0.5);
                 mark_stale(&ui);
                 ui.set_main_view(0);
                 ui.set_open_step(3);
@@ -1662,7 +1710,7 @@ fn main() -> Result<()> {
             run_job(&ui, &s, "Making preview", move |job, dd| {
                 let cat = Catalog::open(&dd)?;
                 let pool = load_pool(&s2, &cat, &libs, &settings, job)?;
-                let (target, mref) = load_target(&motif, &grid)?;
+                let (target, mref) = load_target_with_crop(&motif, &grid, settings.motif_zoom, settings.motif_pan)?;
                 let p = Project::create_with_outline(&pool, libraries_refs(&cat, &libs)?, &target, mref, grid, settings, outline, job).map_err(anyhow::Error::from)?;
                 let tile_px = (2400 / grid.cols.max(grid.rows)).clamp(4, 48);
                 let buf = to_image(&render_preview(&cat, &p, tile_px, job)?);
@@ -1771,7 +1819,17 @@ fn main() -> Result<()> {
         let (w, s) = (ui.as_weak(), st.clone());
         ui.on_preview_tile_clicked(move |u, v| {
             let ui = w.unwrap();
-            let tile = s.lock().unwrap().project.as_ref().and_then(|p| zoom::tile_at(p, u as f64, v as f64));
+            let (tile, pinned) = {
+                let guard = s.lock().unwrap();
+                match guard.project.as_ref().and_then(|p| zoom::tile_at(p, u as f64, v as f64).map(|t| (t, p.is_pinned(t)))) {
+                    Some((t, p)) => (Some(t), p),
+                    None => (None, false),
+                }
+            };
+            if pinned {
+                ui.set_status("This tile is pinned. Right-click it to unpin first.".into());
+                return;
+            }
             if let Some(tile) = tile {
                 reselect_preview(&ui, &s, Some(tile));
             }
@@ -1809,6 +1867,78 @@ fn main() -> Result<()> {
                 p.at = (p.at + 1) % p.tiles.len().max(1);
             }
             show_picked_place(&ui, &s, true);
+        });
+    }
+    {
+        let (w, s) = (ui.as_weak(), st.clone());
+        ui.on_tile_toggle_pin(move || {
+            let ui = w.unwrap();
+            let mut st = s.lock().unwrap();
+            let Some(cur) = st.picked.as_ref().and_then(|p| p.tiles.get(p.at).copied()) else { return };
+            let Some(existing) = st.project.as_ref() else { return };
+            let mut updated = (**existing).clone();
+            let pinned = updated.toggle_pin(cur);
+            let count = updated.settings.pinned_tiles.len() as i32;
+            st.project = Some(Arc::new(updated));
+            ui.set_pinned_tile_count(count);
+            show_picked_place(&ui, &st, false);
+            ui.set_status(if pinned { "Tile pinned (kept across New photo selection).".into() } else { "Tile unpinned.".into() });
+            let _ = autosave(&st);
+        });
+    }
+    {
+        let (w, s) = (ui.as_weak(), st.clone());
+        ui.on_tile_exclude_photo(move || {
+            let ui = w.unwrap();
+            if ui.get_busy() || ui.get_preview_stale() {
+                return;
+            }
+            let (previous, source) = {
+                let guard = s.lock().unwrap();
+                let Some(proj) = guard.project.clone() else { return };
+                let Some(src) = guard.picked.as_ref().map(|p| p.source) else { return };
+                (proj, src)
+            };
+            let revision = ui.get_settings_revision();
+            let (zoom, cx, cy, distance) = (ui.get_preview_zoom(), ui.get_preview_cx(), ui.get_preview_cy(), ui.get_preview_distance());
+            let shared = s.clone();
+            run_job(&ui, &s, "Replacing excluded photo", move |job, dd| {
+                let cat = Catalog::open(&dd)?;
+                let pool = load_pool(&shared, &cat, &previous.library_ids(), &previous.settings, job)?;
+                let p = previous.exclude_photo(&pool, source, job)?;
+                let tile_px = (2400 / p.grid.cols.max(p.grid.rows)).clamp(4, 48);
+                let buf = to_image(&render_preview(&cat, &p, tile_px, job)?);
+                job.check()?;
+                Ok(Box::new(move |ui: &AppWindow, s: &mut State| {
+                    if ui.get_settings_revision() != revision || !s.project.as_ref().is_some_and(|cur| Arc::ptr_eq(cur, &previous)) {
+                        return;
+                    }
+                    show_project(ui, s, p, buf, false);
+                    ui.set_preview_zoom(zoom);
+                    ui.set_preview_distance(distance);
+                    ui.set_preview_goto_u(cx);
+                    ui.set_preview_goto_v(cy);
+                    ui.set_preview_goto_n(ui.get_preview_goto_n() + 1);
+                    ui.set_status("Photo excluded and replaced.".into());
+                    if let Err(e) = autosave(s) {
+                        report_error(ui, e.context("could not autosave"));
+                    }
+                }))
+            });
+        });
+    }
+    {
+        let (w, s) = (ui.as_weak(), st.clone());
+        ui.on_clear_excluded_photos(move || {
+            let ui = w.unwrap();
+            let mut st = s.lock().unwrap();
+            if !st.excluded_photos.is_empty() {
+                st.excluded_photos.clear();
+                ui.set_excluded_photo_count(0);
+                mark_stale(&ui);
+                update_grid_info(&ui, &st);
+                ui.set_status("Cleared excluded photos. Click Update preview to apply.".into());
+            }
         });
     }
     {
@@ -2239,9 +2369,15 @@ mod tests {
         ui.set_date_to("2024".into());
         ui.set_camera_filter("Fuji".into());
         ui.set_lens_filter("35mm".into());
+        ui.set_motif_zoom(2.0);
+        ui.set_motif_pan_x(0.25);
+        ui.set_motif_pan_y(0.75);
+        ui.set_focal_priority(true);
         let mut st = super::State::default();
         let hero_hex = super::hex(&[0xab; 32]);
+        let excl_hex = super::hex(&[0xcd; 32]);
         st.must_include.push((hero_hex.clone(), "hero.jpg".into()));
+        st.excluded_photos.push(excl_hex.clone());
         let settings = super::read_settings(&ui, &st).unwrap().1;
         assert_eq!(
             settings.photo_filters,
@@ -2256,6 +2392,11 @@ mod tests {
             }
         );
         assert_eq!(settings.must_include, vec![hero_hex]);
+        assert_eq!(settings.excluded_photos, vec![excl_hex]);
+        assert!((settings.motif_zoom - 2.0).abs() < 1e-4);
+        assert!((settings.motif_pan[0] - 0.25).abs() < 1e-4);
+        assert!((settings.motif_pan[1] - 0.75).abs() < 1e-4);
+        assert!(settings.focal_priority);
         let selections = Rc::new(Cell::new(0));
         let count = selections.clone();
         ui.on_new_selection(move || count.set(count.get() + 1));

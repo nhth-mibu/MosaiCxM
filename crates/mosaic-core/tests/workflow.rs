@@ -263,6 +263,63 @@ fn exif_date_camera_lens_filters_and_must_include_hero_photos() {
 }
 
 #[test]
+fn motif_crop_focal_priority_pinning_and_excluding() {
+    let (e, lib) = indexed_env(20);
+    let pool = Pool::load(&e.cat, &[lib], true).unwrap();
+    let grid = GridSpec::new(200.0, 150.0, 4, 3).unwrap();
+    // Create a motif with bright red on the left half and dark blue on the right half,
+    // plus a high-contrast checkerboard in the top-left corner for focal priority testing.
+    let mut img = RgbImage::new(200, 150);
+    for (x, y, p) in img.enumerate_pixels_mut() {
+        *p = if x < 100 {
+            if y < 75 && ((x / 8 + y / 8) % 2 == 0) { image::Rgb([255, 255, 255]) } else { image::Rgb([220, 20, 20]) }
+        } else {
+            image::Rgb([20, 30, 220])
+        };
+    }
+    let mpath = e.root.join("split_motif.png");
+    img.save(&mpath).unwrap();
+
+    // Custom zoom + pan to left vs right produces distinct crops and target cells.
+    let (t_left, m_left) = mosaic_core::project::load_target_with_crop(&mpath, &grid, 2.0, [0.0, 0.5]).unwrap();
+    let (t_right, m_right) = mosaic_core::project::load_target_with_crop(&mpath, &grid, 2.0, [1.0, 0.5]).unwrap();
+    assert!(m_left.crop[0] < 0.01 && m_right.crop[0] > 0.45);
+    assert!((m_left.crop[2] - 0.5).abs() < 0.02);
+    assert_ne!(t_left.cells(), t_right.cells());
+
+    // Focal salience ranks high-contrast tiles higher than flat tiles.
+    let (t_full, m_full) = mosaic_core::project::load_target_with_crop(&mpath, &grid, 1.0, [0.5, 0.5]).unwrap();
+    assert_eq!(t_full.tile_priority.len(), grid.tiles());
+    assert!(t_full.tile_priority[0] > t_full.tile_priority[grid.tiles() - 1]);
+
+    // Build project with focal_priority enabled, pin tile 0, then reselect.
+    let mut s = MatchSettings::for_method(Method::Classic);
+    s.focal_priority = true;
+    s.max_reuse = Some(2);
+    let mut proj = Project::create(&pool, libraries_refs(&e.cat, &[lib]).unwrap(), &t_full, m_full, grid, s, &Job::default()).unwrap();
+    let orig_tile0_hash = proj.sources[proj.tiles[0].photo as usize].hash.clone();
+    assert!(proj.toggle_pin(0));
+    assert!(proj.is_pinned(0));
+    // Swapping a pinned tile directly must fail.
+    assert!(proj.reselect(&pool, Some(0), &Job::default()).is_err());
+    // Full reselection keeps tile 0 locked to its original photo.
+    let reselected = proj.reselect(&pool, None, &Job::default()).unwrap();
+    assert_eq!(reselected.sources[reselected.tiles[0].photo as usize].hash, orig_tile0_hash);
+    assert!(reselected.is_pinned(0));
+
+    // Excluding the photo on tile 0 replaces ONLY tiles using that photo, removes it from sources, and records it.
+    let excluded_source_idx = reselected.tiles[0].photo as usize;
+    let excluded_hash = reselected.sources[excluded_source_idx].hash.clone();
+    let other_tile = (1..reselected.tiles.len()).find(|&i| reselected.tiles[i].photo as usize != excluded_source_idx).unwrap();
+    let other_hash = reselected.sources[reselected.tiles[other_tile].photo as usize].hash.clone();
+    let after_excl = reselected.exclude_photo(&pool, excluded_source_idx, &Job::default()).unwrap();
+    assert!(after_excl.settings.excluded_photos.contains(&excluded_hash));
+    assert!(!after_excl.sources.iter().any(|src| src.hash == excluded_hash), "excluded photo must be replaced everywhere");
+    assert_eq!(after_excl.sources[after_excl.tiles[other_tile].photo as usize].hash, other_hash, "untouched tiles must remain unchanged");
+    assert!(!after_excl.is_pinned(0), "pin on replaced tile must be cleared");
+}
+
+#[test]
 fn document_decisions_ignore_old_cache_and_separate_models_and_failures() {
     use mosaic_core::filters::{DocumentClassifier, PhotoFilters};
     use std::cell::Cell;

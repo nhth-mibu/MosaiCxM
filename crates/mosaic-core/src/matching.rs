@@ -101,6 +101,37 @@ pub struct MatchSettings {
     /// Content hashes (64-char hex) of hero photos guaranteed to appear at least once.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub must_include: Vec<String>,
+    /// Motif crop zoom factor (1.0 = full cover fit, up to 5.0).
+    #[serde(default = "default_motif_zoom", skip_serializing_if = "is_default_motif_zoom")]
+    pub motif_zoom: f32,
+    /// Motif crop pan position `[x, y]` in `0.0..=1.0` (`[0.5, 0.5]` = centred).
+    #[serde(default = "default_motif_pan", skip_serializing_if = "is_default_motif_pan")]
+    pub motif_pan: [f32; 2],
+    /// Assign tiles covering motif faces and high-detail edges before flat regions.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub focal_priority: bool,
+    /// Content hashes (64-char hex) of photos excluded from this mosaic.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub excluded_photos: Vec<String>,
+    /// Row-major indices of tiles locked across photo reselection and swaps.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pinned_tiles: Vec<u32>,
+}
+
+fn default_motif_zoom() -> f32 {
+    1.0
+}
+fn is_default_motif_zoom(z: &f32) -> bool {
+    (*z - 1.0).abs() < 1e-4
+}
+fn default_motif_pan() -> [f32; 2] {
+    [0.5, 0.5]
+}
+fn is_default_motif_pan(p: &[f32; 2]) -> bool {
+    (p[0] - 0.5).abs() < 1e-4 && (p[1] - 0.5).abs() < 1e-4
+}
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 impl MatchSettings {
@@ -122,6 +153,11 @@ impl MatchSettings {
             motif_blend: 0.0,
             hidden_message: None,
             must_include: Vec::new(),
+            motif_zoom: 1.0,
+            motif_pan: [0.5, 0.5],
+            focal_priority: false,
+            excluded_photos: Vec::new(),
+            pinned_tiles: Vec::new(),
         };
         if method == Method::Variety {
             s.repeat_penalty = 8.0;
@@ -148,9 +184,18 @@ impl MatchSettings {
         if self.repeat_radius > 20 {
             bail!("repeat radius must be at most 20 tiles");
         }
+        if !self.motif_zoom.is_finite() || !(1.0..=5.0).contains(&self.motif_zoom) {
+            bail!("motif zoom must be between 1 and 5");
+        }
+        if !self.motif_pan.iter().all(|v| v.is_finite() && (0.0..=1.0).contains(v)) {
+            bail!("motif pan must be between 0 and 1");
+        }
         self.photo_filters.validate()?;
         for h in &self.must_include {
             crate::catalog::unhex(h).map_err(|_| anyhow::anyhow!("invalid must-include photo hash '{h}'"))?;
+        }
+        for h in &self.excluded_photos {
+            crate::catalog::unhex(h).map_err(|_| anyhow::anyhow!("invalid excluded photo hash '{h}'"))?;
         }
         if let Some(m) = &self.hidden_message {
             m.validate()?;
@@ -199,29 +244,130 @@ impl GridSpec {
     }
 }
 
+/// Normalised motif crop rectangle `[x, y, w, h]` for a cover-fit zoomed by
+/// `zoom` (1..=5) and panned by `pan` (`[0..=1, 0..=1]`).
+pub fn motif_crop_rect(motif_aspect: f32, mosaic_aspect: f32, zoom: f32, pan: [f32; 2]) -> [f32; 4] {
+    let base = crop_rect(motif_aspect, mosaic_aspect, 0.5);
+    let z = if zoom.is_finite() { zoom.clamp(1.0, 5.0) } else { 1.0 };
+    let w = (base[2] / z).clamp(1e-3, 1.0);
+    let h = (base[3] / z).clamp(1e-3, 1.0);
+    let px = if pan[0].is_finite() { pan[0].clamp(0.0, 1.0) } else { 0.5 };
+    let py = if pan[1].is_finite() { pan[1].clamp(0.0, 1.0) } else { 0.5 };
+    let x = ((1.0 - w) * px).clamp(0.0, 1.0 - w);
+    let y = ((1.0 - h) * py).clamp(0.0, 1.0 - h);
+    [x, y, w, h]
+}
+
 /// Target motif sampled at CELLS×CELLS Lab cells per tile.
 #[derive(Debug, Clone)]
 pub struct Target {
     pub cols: u32,
     pub rows: u32,
     pub tiles: Vec<TileDesc>,
+    /// Per-tile visual priority (motif faces + edge/contrast salience), used
+    /// when [`MatchSettings::focal_priority`] is enabled.
+    pub tile_priority: Vec<f32>,
+}
+
+/// Compute per-tile visual salience from motif contrast plus optional face
+/// boxes (in normalised cropped-motif coordinates). Higher values match first.
+pub fn tile_salience(target: &Target, faces: &[crate::faces::Face]) -> Vec<f32> {
+    let cols = target.cols as usize;
+    let rows = target.rows as usize;
+    let n = cols * rows;
+    if n == 0 || target.tiles.len() != n {
+        return Vec::new();
+    }
+    let means: Vec<Lab> = target.tiles.iter().map(mean_lab).collect();
+    let mut raw = vec![0.0f32; n];
+    let mut max_raw = 0.0f32;
+    let cell_count = (CELLS * CELLS) as f32;
+    for y in 0..rows {
+        for x in 0..cols {
+            let idx = y * cols + x;
+            let d = &target.tiles[idx];
+            let m = means[idx];
+            // Internal luminance + chroma detail within the tile.
+            let mut internal = 0.0f32;
+            for c in 0..(CELLS * CELLS) {
+                let dl = d[c * 3] - m[0];
+                let da = d[c * 3 + 1] - m[1];
+                let db = d[c * 3 + 2] - m[2];
+                internal += (dl * dl + 0.5 * (da * da + db * db)).sqrt();
+            }
+            internal /= cell_count;
+            // Edge contrast against 4-neighbours.
+            let mut edge = 0.0f32;
+            let mut nc = 0.0f32;
+            for (nx, ny) in [
+                (x.wrapping_sub(1), y),
+                (x + 1, y),
+                (x, y.wrapping_sub(1)),
+                (x, y + 1),
+            ] {
+                if nx < cols && ny < rows {
+                    edge += de2(&m, &means[ny * cols + nx]).sqrt();
+                    nc += 1.0;
+                }
+            }
+            if nc > 0.0 {
+                edge /= nc;
+            }
+            let v = internal + 0.5 * edge;
+            raw[idx] = v;
+            if v > max_raw {
+                max_raw = v;
+            }
+        }
+    }
+    let scale = if max_raw > 1e-4 { 1.0 / max_raw } else { 0.0 };
+    let mut prio: Vec<f32> = raw.into_iter().map(|v| v * scale).collect();
+    // Strongly boost tiles overlapping any detected face in the motif.
+    if !faces.is_empty() {
+        let fw = 1.0 / cols as f32;
+        let fh = 1.0 / rows as f32;
+        for y in 0..rows {
+            let ty0 = y as f32 * fh;
+            let ty1 = ty0 + fh;
+            for x in 0..cols {
+                let tx0 = x as f32 * fw;
+                let tx1 = tx0 + fw;
+                let hits_face = faces.iter().any(|f| {
+                    let [fx, fy, fbw, fbh] = f.rect;
+                    tx0 < fx + fbw && tx1 > fx && ty0 < fy + fbh && ty1 > fy
+                });
+                if hits_face {
+                    prio[y * cols + x] += 2.0;
+                }
+            }
+        }
+    }
+    prio
 }
 
 impl Target {
-    /// `crop` is the normalised part of the motif used (cover fit).
+    /// `crop` is the normalised part of the motif used (centred cover fit).
     pub fn from_image(img: &RgbImage, grid: &GridSpec) -> (Self, [f32; 4]) {
-        let motif_aspect = img.width() as f32 / img.height() as f32;
+        Self::from_image_cropped(img, grid, 1.0, [0.5, 0.5])
+    }
+
+    /// Like [`Target::from_image`] with a custom `zoom` (1..=5) and `pan` (`[0..=1, 0..=1]`).
+    pub fn from_image_cropped(img: &RgbImage, grid: &GridSpec, zoom: f32, pan: [f32; 2]) -> (Self, [f32; 4]) {
+        let motif_aspect = img.width() as f32 / img.height().max(1) as f32;
         let mosaic_aspect = (grid.width_mm / grid.height_mm) as f32;
-        let crop = crop_rect(motif_aspect, mosaic_aspect, 0.5);
-        let x = (crop[0] * img.width() as f32).round() as u32;
-        let y = (crop[1] * img.height() as f32).round() as u32;
+        let crop = motif_crop_rect(motif_aspect, mosaic_aspect, zoom, pan);
+        let x = ((crop[0] * img.width() as f32).round() as u32).min(img.width().saturating_sub(1));
+        let y = ((crop[1] * img.height() as f32).round() as u32).min(img.height().saturating_sub(1));
         let w = ((crop[2] * img.width() as f32).round() as u32).clamp(1, img.width() - x);
         let h = ((crop[3] * img.height() as f32).round() as u32).clamp(1, img.height() - y);
         let sub = image::imageops::crop_imm(img, x, y, w, h).to_image();
         let gw = grid.cols as usize * CELLS;
         let gh = grid.rows as usize * CELLS;
         let cells = descriptor::area_average_lab(&sub, gw, gh);
-        (Self::from_cells(grid.cols, grid.rows, &cells), crop)
+        let mut target = Self::from_cells(grid.cols, grid.rows, &cells);
+        let faces = crate::faces::detect(&sub).unwrap_or_default();
+        target.tile_priority = tile_salience(&target, &faces);
+        (target, crop)
     }
 
     pub fn from_cells(cols: u32, rows: u32, cells: &[Lab]) -> Self {
@@ -239,7 +385,7 @@ impl Target {
                 tiles.push(d);
             }
         }
-        Self { cols, rows, tiles }
+        Self { cols, rows, tiles, tile_priority: Vec::new() }
     }
 
     pub fn cells(&self) -> Vec<Lab> {
@@ -513,6 +659,7 @@ pub fn match_tiles_masked(
 
 /// Choose alternatives to existing pool-indexed assignments. `only` limits
 /// the change to one tile; all other placements remain exactly as supplied.
+/// Pinned tiles (in [`MatchSettings::pinned_tiles`]) are kept unchanged.
 pub fn reselect_tiles(
     pool: &Pool,
     target: &Target,
@@ -525,8 +672,58 @@ pub fn reselect_tiles(
     if previous.len() != grid.tiles() || only.is_some_and(|i| previous.get(i).is_none_or(TileAssign::is_empty)) {
         return Err(anyhow::anyhow!("choose a photo tile inside the mosaic").into());
     }
+    let (replace, allow_keep_old) = match only {
+        Some(idx) => {
+            if s.pinned_tiles.contains(&(idx as u32)) {
+                return Err(anyhow::anyhow!("this tile is pinned; unpin it before swapping its photo").into());
+            }
+            ((0..grid.tiles()).map(|i| i == idx).collect::<Vec<_>>(), false)
+        }
+        None => {
+            let pinned: std::collections::HashSet<u32> = s.pinned_tiles.iter().copied().collect();
+            let excluded: std::collections::HashSet<crate::catalog::Hash> = s
+                .excluded_photos
+                .iter()
+                .filter_map(|h| crate::catalog::unhex(h).ok())
+                .collect();
+            let mask: Vec<bool> = previous
+                .iter()
+                .enumerate()
+                .map(|(i, t)| {
+                    if t.is_empty() {
+                        return false;
+                    }
+                    let is_excluded = pool.photos.get(t.photo as usize).is_some_and(|p| excluded.contains(&p.hash));
+                    is_excluded || !pinned.contains(&(i as u32))
+                })
+                .collect();
+            if !mask.iter().any(|&r| r) {
+                return Err(anyhow::anyhow!("all tiles are pinned; unpin at least one tile to choose new photos").into());
+            }
+            (mask, true)
+        }
+    };
+    reselect_tiles_subset(pool, target, grid, s, previous, &replace, allow_keep_old, job)
+}
+
+/// Replace only the tiles where `replace[i]` is true, keeping all other
+/// non-empty tiles from `previous` locked in place.
+#[allow(clippy::too_many_arguments)]
+pub fn reselect_tiles_subset(
+    pool: &Pool,
+    target: &Target,
+    grid: &GridSpec,
+    s: &MatchSettings,
+    previous: &[TileAssign],
+    replace: &[bool],
+    allow_keep_old: bool,
+    job: &Job,
+) -> Result<(Vec<TileAssign>, MatchStats), MatchError> {
+    if previous.len() != grid.tiles() || replace.len() != grid.tiles() {
+        return Err(anyhow::anyhow!("choose a photo tile inside the mosaic").into());
+    }
     let active: Vec<bool> = previous.iter().map(|t| !t.is_empty()).collect();
-    match_selection(pool, target, grid, s, Some(&active), Some((previous, only)), job)
+    match_selection(pool, target, grid, s, Some(&active), Some((previous, replace, allow_keep_old)), job)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -536,7 +733,7 @@ fn match_selection(
     grid: &GridSpec,
     s: &MatchSettings,
     active: Option<&[bool]>,
-    previous: Option<(&[TileAssign], Option<usize>)>,
+    previous: Option<(&[TileAssign], &[bool], bool)>,
     job: &Job,
 ) -> Result<(Vec<TileAssign>, MatchStats), MatchError> {
     s.validate()?;
@@ -552,16 +749,32 @@ fn match_selection(
     if placed_tiles == 0 {
         return Err(anyhow::anyhow!("the outline leaves no tile to fill").into());
     }
-    check_feasible_n(grid, placed_tiles, pool.group_count, s).map_err(MatchError::Infeasible)?;
-    let mut stats = MatchStats { pool_photos: pool.photos.len(), pool_groups: pool.group_count, tiles: placed_tiles, ..Default::default() };
+    let mut excluded_group = vec![false; pool.group_count as usize];
+    for hex_hash in &s.excluded_photos {
+        if let Ok(h) = crate::catalog::unhex(hex_hash) {
+            if let Some(pi) = pool.index_of(&h) {
+                excluded_group[pool.photos[pi].group as usize] = true;
+            }
+        }
+    }
+    let excluded_count = excluded_group.iter().filter(|&&e| e).count() as u32;
+    let avail_groups = pool.group_count.saturating_sub(excluded_count);
+    check_feasible_n(grid, placed_tiles, avail_groups, s).map_err(MatchError::Infeasible)?;
+    let mut stats = MatchStats { pool_photos: pool.photos.len(), pool_groups: avail_groups, tiles: placed_tiles, ..Default::default() };
     let t0 = Instant::now();
     job.report("building candidates", 0, 1);
     let mut cands = build_candidates(pool, grid.tile_aspect(), s.crop_offsets, s.face_crop);
+    if excluded_count > 0 {
+        cands.retain(|c| !excluded_group[c.group as usize]);
+    }
+    if cands.is_empty() {
+        return Err(anyhow::anyhow!("no source photos remain after exclusions").into());
+    }
     // Keep the exact saved crops available, including projects made before a
     // library's face metadata changed. Candidate IDs let assignment reuse its
     // normal capacity, neighbour and statistics calculations.
     let mut old = vec![u32::MAX; grid.tiles()];
-    if let Some((tiles, _)) = previous {
+    if let Some((tiles, _, _)) = previous {
         let key = |photo, crop: [f32; 4]| (photo, crop.map(f32::to_bits));
         let mut ids: std::collections::HashMap<_, _> = cands.iter().enumerate().map(|(i, c)| (key(c.photo, c.crop), i as u32)).collect();
         for (i, tile) in tiles.iter().enumerate().filter(|(_, t)| !t.is_empty()) {
@@ -578,11 +791,11 @@ fn match_selection(
     stats.candidates = cands.len();
     stats.build_ms = ms(t0);
     job.check()?;
-    let selected: Vec<bool> = active.iter().enumerate().map(|(i, &a)| a && previous.and_then(|(_, only)| only).is_none_or(|only| i == only)).collect();
-    let lists = retrieve_selection(&cands, &retrieval, target, s, Some(&selected), Some(&old), job)?;
+    let selected: Vec<bool> = active.iter().enumerate().map(|(i, &a)| a && previous.is_none_or(|(_, replace, _)| replace[i])).collect();
+    let lists = retrieve_selection(&cands, &retrieval, target, s, Some(&selected), Some(&old), &excluded_group, job)?;
     stats.retrieval_ms = ms(t0) - stats.build_ms;
     let t1 = Instant::now();
-    let tiles = assign(pool, &cands, &retrieval, target, grid, s, &selected, &lists, &old, previous, &mut stats, job)?;
+    let tiles = assign(pool, &cands, &retrieval, target, grid, s, &selected, &lists, &old, &excluded_group, previous, &mut stats, job)?;
     stats.assign_ms = ms(t1);
     Ok((tiles, stats))
 }
@@ -598,10 +811,11 @@ pub fn retrieve(cands: &[Candidate], r: &Retrieval, target: &Target, s: &MatchSe
 
 /// [`retrieve`] that leaves inactive tiles with an empty list.
 pub fn retrieve_active(cands: &[Candidate], r: &Retrieval, target: &Target, s: &MatchSettings, active: Option<&[bool]>, job: &Job) -> Result<Vec<Vec<(u32, f32)>>> {
-    retrieve_selection(cands, r, target, s, active, None, job)
+    retrieve_selection(cands, r, target, s, active, None, &[], job)
 }
 
-fn retrieve_selection(cands: &[Candidate], r: &Retrieval, target: &Target, s: &MatchSettings, active: Option<&[bool]>, old: Option<&[u32]>, job: &Job) -> Result<Vec<Vec<(u32, f32)>>> {
+#[allow(clippy::too_many_arguments)]
+fn retrieve_selection(cands: &[Candidate], r: &Retrieval, target: &Target, s: &MatchSettings, active: Option<&[bool]>, old: Option<&[u32]>, excluded_group: &[bool], job: &Job) -> Result<Vec<Vec<(u32, f32)>>> {
     // When a tile's choice cannot depend on earlier choices (no reuse limit,
     // no penalties), only its best candidate is ever used. Keeping just that
     // one saves about 0.4 GB per million tiles.
@@ -620,7 +834,15 @@ fn retrieve_selection(cands: &[Candidate], r: &Retrieval, target: &Target, s: &M
                     return Vec::new();
                 }
                 let group = old.and_then(|o| cands.get(o[ci * 4096 + j] as usize)).map(|c| c.group);
-                let mut v: Vec<(u32, f32)> = r.query(cands, t, k).into_iter().filter(|&c| Some(cands[c as usize].group) != group).map(|c| (c, score(s.method, t, &cands[c as usize]))).collect();
+                let mut v: Vec<(u32, f32)> = r
+                    .query(cands, t, k)
+                    .into_iter()
+                    .filter(|&c| {
+                        let g = cands[c as usize].group;
+                        Some(g) != group && !excluded_group.get(g as usize).copied().unwrap_or(false)
+                    })
+                    .map(|c| (c, score(s.method, t, &cands[c as usize])))
+                    .collect();
                 v.sort_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)));
                 v.truncate(keep);
                 v.shrink_to_fit();
@@ -644,7 +866,8 @@ fn assign(
     active: &[bool],
     lists: &[Vec<(u32, f32)>],
     old: &[u32],
-    previous: Option<(&[TileAssign], Option<usize>)>,
+    excluded_group: &[bool],
+    previous: Option<(&[TileAssign], &[bool], bool)>,
     stats: &mut MatchStats,
     job: &Job,
 ) -> Result<Vec<TileAssign>> {
@@ -663,7 +886,8 @@ fn assign(
     let radius = s.repeat_radius as i64;
     let use_neighbors = s.repeat_penalty > 0.0 && radius > 0;
     let mut exhausted_groups = 0usize;
-    if !s.must_include.is_empty() && previous.is_none_or(|(_, only)| only.is_none()) {
+    let allow_keep_old = previous.is_some_and(|(_, _, allow)| allow);
+    if !s.must_include.is_empty() && previous.is_none_or(|(_, _, allow)| allow) {
         let mut seen = std::collections::HashSet::new();
         let mut must_photos = Vec::new();
         for hex_hash in &s.must_include {
@@ -674,6 +898,14 @@ fn assign(
             let Some(pi) = pool.index_of(&h) else {
                 bail!("a must-include photo is not available in the selected photo pool; check your photo filters or folders");
             };
+            let g = pool.photos[pi].group as usize;
+            if excluded_group.get(g).copied().unwrap_or(false) {
+                continue;
+            }
+            if uses[g] > 0 {
+                // Already present via a pinned tile.
+                continue;
+            }
             must_photos.push(pi as u32);
         }
         let active_count = active.iter().filter(|&&a| a).count();
@@ -732,7 +964,27 @@ fn assign(
         }
     }
     let mut order: Vec<u32> = (0..n as u32).filter(|&t| active[t as usize] && placed[t as usize] == u32::MAX).collect();
-    SplitMix64::new(s.seed).shuffle(&mut order);
+    let mut rng = SplitMix64::new(s.seed);
+    if s.focal_priority {
+        let computed;
+        let prio: &[f32] = if target.tile_priority.len() == n {
+            &target.tile_priority
+        } else {
+            computed = tile_salience(target, &[]);
+            &computed
+        };
+        let mut scored: Vec<(u32, f32)> = order
+            .into_iter()
+            .map(|t| {
+                let jitter = (rng.next_u64() as f64 / u64::MAX as f64) as f32 * 0.05;
+                (t, prio.get(t as usize).copied().unwrap_or(0.0) + jitter)
+            })
+            .collect();
+        scored.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+        order = scored.into_iter().map(|(t, _)| t).collect();
+    } else {
+        rng.shuffle(&mut order);
+    }
     let usage_pen = if s.method == Method::Variety { s.usage_penalty } else { 0.0 };
     let mut neigh: Vec<(u32, f32)> = Vec::new();
     let mut avail: Option<AvailIndex> = None;
@@ -767,7 +1019,7 @@ fn assign(
             if Some(g) == old_group {
                 return None;
             }
-            if uses[g as usize] >= cap {
+            if excluded_group.get(g as usize).copied().unwrap_or(false) || uses[g as usize] >= cap {
                 return None;
             }
             let mut c = base + usage_pen * uses[g as usize] as f32;
@@ -798,7 +1050,7 @@ fn assign(
             for _attempt in 0..3 {
                 let stale = avail.as_ref().map(|a: &AvailIndex| exhausted_groups > a.exhausted_at + a.size / 10 + 16).unwrap_or(true);
                 if stale {
-                    avail = AvailIndex::build(cands, s.method, &uses, cap, exhausted_groups)?;
+                    avail = AvailIndex::build(cands, s.method, &uses, excluded_group, cap, exhausted_groups)?;
                     stats.index_rebuilds += 1;
                 }
                 let Some(a) = &avail else { break };
@@ -814,14 +1066,17 @@ fn assign(
                 avail = None; // force a rebuild
             }
         }
-        // A single edit must use a different photo. A whole selection may
-        // retain a tile when alternatives have exhausted their reuse limits.
+        // A single edit or exclusion must use a different photo. A whole selection may
+        // retain an unexcluded tile when alternatives have exhausted their reuse limits.
         if choice.is_none() && previous.is_some() {
             choice = cands.iter().enumerate().filter_map(|(ci, c)| {
                 cost_of(ci as u32, score(s.method, &target.tiles[t], c), &uses).map(|cost| (ci as u32, cost))
             }).min_by(|a, b| a.1.total_cmp(&b.1));
-            if choice.is_none() && previous.is_some_and(|(_, only)| only.is_none()) && uses[cands[old[t] as usize].group as usize] < cap {
-                choice = Some((old[t], 0.0));
+            if choice.is_none() && allow_keep_old {
+                let og = cands[old[t] as usize].group as usize;
+                if !excluded_group.get(og).copied().unwrap_or(false) && uses[og] < cap {
+                    choice = Some((old[t], 0.0));
+                }
             }
         }
         let Some((ci, _)) = choice else {
@@ -867,7 +1122,7 @@ fn assign(
         } else {
             [0.0; 3]
         };
-        out.push(if let Some((tiles, _)) = previous.filter(|_| !active[t]) { tiles[t] } else { TileAssign { photo: c.photo, crop: c.crop, adjust } });
+        out.push(if let Some((tiles, _, _)) = previous.filter(|_| !active[t]) { tiles[t] } else { TileAssign { photo: c.photo, crop: c.crop, adjust } });
     }
     let mut per_group = vec![0u32; pool.group_count as usize];
     for p in placed.iter().filter(|&&p| p != u32::MAX) {
@@ -891,9 +1146,10 @@ struct AvailIndex {
 }
 
 impl AvailIndex {
-    fn build(cands: &[Candidate], method: Method, uses: &[u32], cap: u32, exhausted: usize) -> Result<Option<Self>> {
-        let sub: Vec<Candidate> = cands.iter().filter(|c| uses[c.group as usize] < cap).cloned().collect();
-        let map: Vec<u32> = cands.iter().enumerate().filter(|(_, c)| uses[c.group as usize] < cap).map(|(i, _)| i as u32).collect();
+    fn build(cands: &[Candidate], method: Method, uses: &[u32], excluded_group: &[bool], cap: u32, exhausted: usize) -> Result<Option<Self>> {
+        let is_avail = |c: &Candidate| !excluded_group.get(c.group as usize).copied().unwrap_or(false) && uses[c.group as usize] < cap;
+        let sub: Vec<Candidate> = cands.iter().filter(|c| is_avail(c)).cloned().collect();
+        let map: Vec<u32> = cands.iter().enumerate().filter(|(_, c)| is_avail(c)).map(|(i, _)| i as u32).collect();
         if sub.is_empty() {
             return Ok(None);
         }
