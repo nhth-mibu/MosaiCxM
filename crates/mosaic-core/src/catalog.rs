@@ -4,6 +4,7 @@
 
 use crate::descriptor::{Descriptor, DESCRIPTOR_VERSION, GRID_BYTES};
 use crate::faces::{self, Face, FACES_VERSION};
+use crate::saliency::{self, SubjectBox, SALIENCY_VERSION};
 use anyhow::{anyhow, bail, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::HashMap;
@@ -109,6 +110,8 @@ pub struct PoolRow {
     pub dhash: u64,
     /// Faces found while indexing (empty when none, or not yet detected).
     pub faces: Vec<Face>,
+    /// Primary visual subject box (for smart crops when no face is present).
+    pub saliency: Option<SubjectBox>,
 }
 
 pub struct Catalog {
@@ -147,6 +150,7 @@ CREATE TABLE IF NOT EXISTS descriptor(
   had_alpha INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS thumb(content_hash BLOB PRIMARY KEY, version INTEGER NOT NULL, jpeg BLOB NOT NULL);
 CREATE TABLE IF NOT EXISTS faces(content_hash BLOB PRIMARY KEY, version INTEGER NOT NULL, boxes BLOB NOT NULL);
+CREATE TABLE IF NOT EXISTS saliency(content_hash BLOB PRIMARY KEY, version INTEGER NOT NULL, box BLOB NOT NULL);
 CREATE TABLE IF NOT EXISTS photo_classification(content_hash BLOB PRIMARY KEY, version INTEGER NOT NULL, document INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS document_decision(content_hash BLOB NOT NULL, classifier TEXT NOT NULL, document INTEGER NOT NULL, PRIMARY KEY(content_hash, classifier));
 "#;
@@ -347,6 +351,14 @@ impl Catalog {
         Ok(())
     }
 
+    pub fn put_saliency(&self, h: &Hash, s: Option<SubjectBox>) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO saliency(content_hash, version, box) VALUES(?1, ?2, ?3)",
+            params![&h[..], SALIENCY_VERSION, saliency::encode(s)],
+        )?;
+        Ok(())
+    }
+
     pub fn thumb(&self, h: &Hash) -> Result<Option<Vec<u8>>> {
         Ok(self.conn.query_row("SELECT jpeg FROM thumb WHERE content_hash = ?1", [&h[..]], |r| r.get(0)).optional()?)
     }
@@ -355,13 +367,23 @@ impl Catalog {
         Ok(self
             .conn
             .query_row(
-                "SELECT d.width, d.height, d.grid, d.dhash, fc.boxes FROM descriptor d
+                "SELECT d.width, d.height, d.grid, d.dhash, fc.boxes, sl.box FROM descriptor d
                  LEFT JOIN faces fc ON fc.content_hash = d.content_hash AND fc.version = ?3
+                 LEFT JOIN saliency sl ON sl.content_hash = d.content_hash AND sl.version = ?4
                  WHERE d.content_hash = ?1 AND d.version = ?2",
-                params![&h[..], DESCRIPTOR_VERSION, FACES_VERSION],
+                params![&h[..], DESCRIPTOR_VERSION, FACES_VERSION, SALIENCY_VERSION],
                 |r| {
                     let boxes: Option<Vec<u8>> = r.get(4)?;
-                    Ok(PoolRow { hash: *h, width: r.get(0)?, height: r.get(1)?, grid: r.get(2)?, dhash: r.get::<_, i64>(3)? as u64, faces: boxes.map(|b| faces::decode(&b)).unwrap_or_default() })
+                    let sbox: Option<Vec<u8>> = r.get(5)?;
+                    Ok(PoolRow {
+                        hash: *h,
+                        width: r.get(0)?,
+                        height: r.get(1)?,
+                        grid: r.get(2)?,
+                        dhash: r.get::<_, i64>(3)? as u64,
+                        faces: boxes.map(|b| faces::decode(&b)).unwrap_or_default(),
+                        saliency: sbox.and_then(|b| saliency::decode(&b)),
+                    })
                 },
             )
             .optional()?)
@@ -371,8 +393,9 @@ impl Catalog {
     pub fn pool_rows(&self, libs: &[i64]) -> Result<Vec<PoolRow>> {
         let ids = libs.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(",");
         let sql = format!(
-            "SELECT d.content_hash, d.width, d.height, d.grid, d.dhash, fc.boxes FROM descriptor d
+            "SELECT d.content_hash, d.width, d.height, d.grid, d.dhash, fc.boxes, sl.box FROM descriptor d
              LEFT JOIN faces fc ON fc.content_hash = d.content_hash AND fc.version = {FACES_VERSION}
+             LEFT JOIN saliency sl ON sl.content_hash = d.content_hash AND sl.version = {SALIENCY_VERSION}
              WHERE d.version = {DESCRIPTOR_VERSION} AND d.content_hash IN (
                SELECT f.content_hash FROM file f JOIN root r ON f.root_id = r.id
                WHERE f.status = 0 AND r.library_id IN ({ids}))
@@ -388,6 +411,7 @@ impl Catalog {
                 grid: r.get(3)?,
                 dhash: r.get::<_, i64>(4)? as u64,
                 faces: r.get::<_, Option<Vec<u8>>>(5)?.map(|b| faces::decode(&b)).unwrap_or_default(),
+                saliency: r.get::<_, Option<Vec<u8>>>(6)?.and_then(|b| saliency::decode(&b)),
             })
         })?;
         let v: Vec<PoolRow> = rows.collect::<Result<_, _>>()?;
@@ -433,6 +457,7 @@ impl Catalog {
         let n = self.conn.execute("DELETE FROM descriptor WHERE content_hash NOT IN (SELECT content_hash FROM file WHERE content_hash IS NOT NULL)", [])?;
         self.conn.execute("DELETE FROM thumb WHERE content_hash NOT IN (SELECT content_hash FROM descriptor)", [])?;
         self.conn.execute("DELETE FROM faces WHERE content_hash NOT IN (SELECT content_hash FROM descriptor)", [])?;
+        self.conn.execute("DELETE FROM saliency WHERE content_hash NOT IN (SELECT content_hash FROM descriptor)", [])?;
         self.conn.execute("DELETE FROM photo_classification WHERE content_hash NOT IN (SELECT content_hash FROM descriptor)", [])?;
         self.conn.execute("DELETE FROM document_decision WHERE content_hash NOT IN (SELECT content_hash FROM descriptor)", [])?;
         Ok(n)

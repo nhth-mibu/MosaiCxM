@@ -84,6 +84,7 @@ struct Analysis {
     has_icc: bool,
     had_alpha: bool,
     faces: Vec<crate::faces::Face>,
+    saliency: Option<crate::saliency::SubjectBox>,
 }
 
 pub fn update_library(cat: &Catalog, lib: i64, opts: &IndexOptions, job: &Job) -> Result<IndexReport> {
@@ -91,12 +92,15 @@ pub fn update_library(cat: &Catalog, lib: i64, opts: &IndexOptions, job: &Job) -
     let mut rep = IndexReport::default();
     let pool = rayon::ThreadPoolBuilder::new().num_threads(opts.threads.max(1)).build()?;
     let mut known: HashSet<Hash> = {
-        // A photo is fully analysed when it has a current descriptor and faces.
+        // A photo is fully analysed when it has a current descriptor, faces and saliency box.
         let mut st = cat.conn.prepare(
-            "SELECT d.content_hash FROM descriptor d JOIN faces f ON f.content_hash = d.content_hash AND f.version = ?2 WHERE d.version = ?1",
+            "SELECT d.content_hash FROM descriptor d
+             JOIN faces f ON f.content_hash = d.content_hash AND f.version = ?2
+             JOIN saliency s ON s.content_hash = d.content_hash AND s.version = ?3
+             WHERE d.version = ?1",
         )?;
         let v = st
-            .query_map([descriptor::DESCRIPTOR_VERSION, crate::faces::FACES_VERSION], |r| r.get::<_, Vec<u8>>(0))?
+            .query_map([descriptor::DESCRIPTOR_VERSION, crate::faces::FACES_VERSION, crate::saliency::SALIENCY_VERSION], |r| r.get::<_, Vec<u8>>(0))?
             .filter_map(|r| r.ok().and_then(|v| v.try_into().ok()))
             .collect();
         v
@@ -163,6 +167,7 @@ pub fn update_library(cat: &Catalog, lib: i64, opts: &IndexOptions, job: &Job) -
                         if let Some(a) = analysis {
                             cat.put_descriptor(&hash, &a.desc, a.has_icc, a.had_alpha, &a.thumb)?;
                             cat.put_faces(&hash, &a.faces)?;
+                            cat.put_saliency(&hash, a.saliency)?;
                             rep.decoded += 1;
                         } else {
                             rep.reused_descriptors += 1;
@@ -338,7 +343,8 @@ fn analyse(bytes: &[u8]) -> Result<Analysis> {
     let thumb = decode::encode_jpeg(&thumb_img, 85)?;
     // A detector failure must not drop the photo: it is then used without faces.
     let faces = crate::faces::detect(&d.image).unwrap_or_default();
-    Ok(Analysis { desc, thumb, has_icc: d.info.has_icc, had_alpha: d.info.had_alpha, faces })
+    let saliency = crate::saliency::detect(&d.image);
+    Ok(Analysis { desc, thumb, has_icc: d.info.has_icc, had_alpha: d.info.had_alpha, faces, saliency })
 }
 
 type AttributionPair = (Option<String>, Option<String>);

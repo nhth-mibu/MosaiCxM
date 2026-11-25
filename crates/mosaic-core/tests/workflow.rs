@@ -320,6 +320,32 @@ fn motif_crop_focal_priority_pinning_and_excluding() {
 }
 
 #[test]
+fn saliency_cached_during_indexing_and_loaded_into_pool() {
+    let e = env();
+    let dir = e.root.join("sal");
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut img = RgbImage::from_pixel(200, 100, image::Rgb([30, 90, 180]));
+    for y in 20..80 {
+        for x in 140..190 {
+            img.put_pixel(x, y, image::Rgb([250, 140, 20]));
+        }
+    }
+    img.save(dir.join("pet_right.jpg")).unwrap();
+    let lib = e.cat.create_library("sal").unwrap();
+    e.cat.add_root(lib, &dir).unwrap();
+    let r = update_library(&e.cat, lib, &opts(), &Job::default()).unwrap();
+    assert_eq!(r.decoded, 1);
+    let pool = Pool::load(&e.cat, &[lib], true).unwrap();
+    let subj = pool.photos[0].saliency.expect("indexed photo should have cached saliency box");
+    let cx = subj.rect[0] + 0.5 * subj.rect[2];
+    assert!(cx > 0.65, "cached saliency should track off-centre subject, got {cx}");
+    // Second incremental update reuses descriptor + faces + saliency without decoding.
+    let r2 = update_library(&e.cat, lib, &opts(), &Job::default()).unwrap();
+    assert_eq!(r2.decoded, 0);
+    assert_eq!(r2.unchanged, 1);
+}
+
+#[test]
 fn document_decisions_ignore_old_cache_and_separate_models_and_failures() {
     use mosaic_core::filters::{DocumentClassifier, PhotoFilters};
     use std::cell::Cell;

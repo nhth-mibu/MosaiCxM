@@ -399,7 +399,7 @@ mod tests {
     fn people_and_colour_filters_combine() {
         let gray = RgbImage::from_pixel(100, 100, image::Rgb([110, 110, 110]));
         let colour = RgbImage::from_pixel(100, 100, image::Rgb([200, 40, 20]));
-        let p = Pool::from_rows(vec![PoolRow { hash: [1; 32], width: 100, height: 100, grid: descriptor::compute(&gray, 100, 100).grid, dhash: 0, faces: vec![Face { rect: [0.3, 0.2, 0.3, 0.3], score: 1.0 }] }], false);
+        let p = Pool::from_rows(vec![PoolRow { hash: [1; 32], width: 100, height: 100, grid: descriptor::compute(&gray, 100, 100).grid, dhash: 0, faces: vec![Face { rect: [0.3, 0.2, 0.3, 0.3], score: 1.0 }], saliency: None }], false);
         let mut f = PhotoFilters { people: People::Portraits, colour: Colour::BlackAndWhite, skip_documents: false, ..Default::default() };
         assert!(f.allows(&p.photos[0]));
         f.colour = Colour::Colour;

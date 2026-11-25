@@ -422,19 +422,37 @@ fn default_true() -> bool {
 /// hold as much face as the first.
 pub fn photo_crop_positions(p: &PoolPhoto, tile_aspect: f32, crop_offsets: bool, face_crop: bool) -> Vec<f32> {
     let base = crop_positions(p.aspect(), tile_aspect, crop_offsets);
-    if !face_crop || p.faces.is_empty() {
+    if !face_crop {
         return base.to_vec();
     }
-    let Some(t) = faces::crop_t(p.aspect(), tile_aspect, &p.faces, base[0]) else { return base.to_vec() };
-    let held = faces::face_area_in(crop_rect(p.aspect(), tile_aspect, t), &p.faces);
-    let mut v = vec![t];
-    for &o in base {
-        let r = crop_rect(p.aspect(), tile_aspect, o);
-        if (o - t).abs() > 1e-3 && !faces::cuts_face(r, &p.faces) && faces::face_area_in(r, &p.faces) >= held - 1e-6 {
-            v.push(o);
+    if !p.faces.is_empty() {
+        let Some(t) = faces::crop_t(p.aspect(), tile_aspect, &p.faces, base[0]) else { return base.to_vec() };
+        let held = faces::face_area_in(crop_rect(p.aspect(), tile_aspect, t), &p.faces);
+        let mut v = vec![t];
+        for &o in base {
+            let r = crop_rect(p.aspect(), tile_aspect, o);
+            if (o - t).abs() > 1e-3 && !faces::cuts_face(r, &p.faces) && faces::face_area_in(r, &p.faces) >= held - 1e-6 {
+                v.push(o);
+            }
         }
+        return v;
     }
-    v
+    if let Some(subj) = p.saliency {
+        let t = crate::saliency::crop_t(p.aspect(), tile_aspect, subj, base[0]);
+        let cx = subj.rect[0] + 0.5 * subj.rect[2];
+        let cy = subj.rect[1] + 0.5 * subj.rect[3];
+        let mut v = vec![t];
+        for &o in base {
+            if (o - t).abs() > 1e-3 {
+                let r = crop_rect(p.aspect(), tile_aspect, o);
+                if cx >= r[0] && cx <= r[0] + r[2] && cy >= r[1] && cy <= r[1] + r[3] {
+                    v.push(o);
+                }
+            }
+        }
+        return v;
+    }
+    base.to_vec()
 }
 
 pub fn build_candidates(pool: &Pool, tile_aspect: f32, crop_offsets: bool, face_crop: bool) -> Vec<Candidate> {
@@ -1206,7 +1224,7 @@ mod tests {
     use crate::faces::{cuts_face, Face};
 
     fn photo(w: u32, h: u32, faces: Vec<Face>) -> Pool {
-        Pool::from_rows(vec![PoolRow { hash: [1; 32], width: w, height: h, grid: vec![128; descriptor::GRID_BYTES], dhash: 0, faces }], false)
+        Pool::from_rows(vec![PoolRow { hash: [1; 32], width: w, height: h, grid: vec![128; descriptor::GRID_BYTES], dhash: 0, faces, saliency: None }], false)
     }
 
     #[test]
@@ -1221,8 +1239,22 @@ mod tests {
         }
         // Off: the usual top-biased positions, which miss this face.
         assert_eq!(photo_crop_positions(&pool.photos[0], 1.0, true, false), vec![descriptor::TALL_CROP_T, 0.0]);
-        // No faces: unchanged.
+        // No faces and no saliency: unchanged.
         let plain = photo(500, 1000, vec![]);
         assert_eq!(photo_crop_positions(&plain.photos[0], 1.0, false, true), vec![descriptor::TALL_CROP_T]);
+    }
+
+    #[test]
+    fn saliency_crop_centres_non_face_subject() {
+        let subj = crate::saliency::SubjectBox { rect: [0.72, 0.25, 0.22, 0.45], score: 0.9 };
+        let pool = Pool::from_rows(
+            vec![PoolRow { hash: [2; 32], width: 1000, height: 500, grid: vec![128; descriptor::GRID_BYTES], dhash: 0, faces: vec![], saliency: Some(subj) }],
+            false,
+        );
+        let pos = photo_crop_positions(&pool.photos[0], 1.0, false, true);
+        assert_eq!(pos.len(), 1);
+        assert!(pos[0] > 0.65, "saliency crop should shift right toward subject, got {}", pos[0]);
+        // When face_crop is disabled, saliency cropping is also disabled.
+        assert_eq!(photo_crop_positions(&pool.photos[0], 1.0, false, false), vec![0.5]);
     }
 }

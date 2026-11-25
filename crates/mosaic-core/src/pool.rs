@@ -24,6 +24,8 @@ pub struct PoolPhoto {
     pub group: u32,
     /// Faces in the upright frame, used to place crops.
     pub faces: Vec<crate::faces::Face>,
+    /// Primary visual subject box in the upright frame (for smart crops without faces).
+    pub saliency: Option<crate::saliency::SubjectBox>,
 }
 
 impl PoolPhoto {
@@ -54,7 +56,7 @@ impl Pool {
             .filter(|r| seen.insert(r.hash))
             .map(|r| {
                 let mean = mean_lab(&crop_descriptor(&r.grid, [0.0, 0.0, 1.0, 1.0]));
-                PoolPhoto { hash: r.hash, width: r.width, height: r.height, grid: r.grid, dhash: r.dhash, mean, group: 0, faces: r.faces }
+                PoolPhoto { hash: r.hash, width: r.width, height: r.height, grid: r.grid, dhash: r.dhash, mean, group: 0, faces: r.faces, saliency: r.saliency }
             })
             .collect();
         let mut p = Pool { photos, group_count: 0 };
@@ -109,7 +111,7 @@ impl Pool {
             .iter()
             .filter(|p| &p.hash != hash && !excl_groups.contains(&p.group))
             .filter(|p| dhash.map(|d| crate::descriptor::hamming(d, p.dhash) > 4).unwrap_or(true))
-            .map(|p| PoolRow { hash: p.hash, width: p.width, height: p.height, grid: p.grid.clone(), dhash: p.dhash, faces: p.faces.clone() })
+            .map(|p| PoolRow { hash: p.hash, width: p.width, height: p.height, grid: p.grid.clone(), dhash: p.dhash, faces: p.faces.clone(), saliency: p.saliency })
             .collect();
         Pool::from_rows(rows, merge)
     }

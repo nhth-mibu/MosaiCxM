@@ -1947,7 +1947,7 @@ export component AppWindow inherits Window {
                                             Text { text: round(root.usage-penalty * 10) / 10; min-width: 28px; color: Theme.fg; vertical-alignment: center; }
                                         }
                                         TipCheck { text: "Try off-centre crops"; tip: "The app also tries to cut each photo away from its centre, if this gives a better match. This is slower."; checked <=> root.crop-offsets; toggled => { root.changed(); } }
-                                        TipCheck { text: "Keep faces in frame"; tip: "The app finds faces in your photos when it scans them. It cuts each photo so that the faces stay whole in the tile. Photos without faces keep their top part if they are tall."; checked <=> root.face-crop; toggled => { root.changed(); } }
+                                        TipCheck { text: "Keep faces & subjects in frame"; tip: "The app finds faces and main subjects (pets, landmarks, objects) when scanning your photos, and frames each tile crop around them instead of cutting them off."; checked <=> root.face-crop; toggled => { root.changed(); } }
                                         TipCheck { text: "Prioritise faces & detail"; tip: "Match tiles covering faces and sharp edges in your picture first so key details get the best photos before reuse limits fill up."; checked <=> root.focal-priority; toggled => { root.changed(); } }
                                         if root.excluded-photo-count > 0: HorizontalLayout {
                                             spacing: 8px;
