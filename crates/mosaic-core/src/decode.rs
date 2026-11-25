@@ -72,6 +72,7 @@ pub enum Format {
     WebP,
     Tiff,
     Raw,
+    Heif,
 }
 
 pub fn sniff(bytes: &[u8]) -> Option<Format> {
@@ -83,6 +84,8 @@ pub fn sniff(bytes: &[u8]) -> Option<Format> {
         Some(Format::WebP)
     } else if crate::raw::is_raw_container(bytes) {
         Some(Format::Raw)
+    } else if crate::heif::is_heif_container(bytes) {
+        Some(Format::Heif)
     } else if bytes.len() >= 4 && matches!(&bytes[0..4], b"II*\0" | b"MM\0*" | b"II+\0" | b"MM\0+") {
         // Classic TIFF and BigTIFF, little- and big-endian (also covers NEF/ARW/DNG/PEF/SRW).
         Some(Format::Tiff)
@@ -123,6 +126,7 @@ pub fn decode_bytes(bytes: &[u8], min_short_side: Option<u32>) -> Result<Decoded
     match sniff(bytes) {
         Some(Format::Jpeg) => decode_jpeg(bytes, min_short_side),
         Some(Format::Raw) => decode_raw_preview(bytes, min_short_side),
+        Some(Format::Heif) => decode_heif(bytes, min_short_side),
         Some(Format::Tiff) => {
             if let Some(preview) = crate::raw::extract_tiff_preview(bytes) {
                 return decode_raw_preview_slice(bytes, preview, min_short_side);
@@ -135,6 +139,32 @@ pub fn decode_bytes(bytes: &[u8], min_short_side: Option<u32>) -> Result<Decoded
         Some(f) => decode_generic(bytes, f),
         None => bail!("unsupported format"),
     }
+}
+
+fn decode_heif(bytes: &[u8], min_short_side: Option<u32>) -> Result<Decoded> {
+    // Full-res HEIC decodes can expand 12–48 MP into ~150 MB of YUV+RGB buffers.
+    let est = if min_short_side.is_some() { 0 } else { (bytes.len() as u64).saturating_mul(24).min(256 << 20) };
+    let _permit = acquire(est);
+    let mut h = crate::heif::decode(bytes, min_short_side, MAX_DECODE_BYTES)?;
+    let has_icc = h.icc.is_some() || h.already_srgb;
+    let icc_converted = if h.already_srgb {
+        true
+    } else if let Some(ref icc) = h.icc {
+        apply_icc(&mut h.image, icc)
+    } else {
+        false
+    };
+    Ok(Decoded {
+        image: h.image,
+        info: DecodeInfo {
+            full_width: h.full_width,
+            full_height: h.full_height,
+            exif_orientation: 1,
+            has_icc,
+            icc_converted,
+            had_alpha: h.had_alpha,
+        },
+    })
 }
 
 fn decode_raw_preview(bytes: &[u8], min_short_side: Option<u32>) -> Result<Decoded> {
@@ -238,7 +268,7 @@ fn decode_generic(bytes: &[u8], f: Format) -> Result<Decoded> {
     reader.set_format(match f {
         Format::Png => image::ImageFormat::Png,
         Format::WebP => image::ImageFormat::WebP,
-        Format::Jpeg | Format::Raw => image::ImageFormat::Jpeg,
+        Format::Jpeg | Format::Raw | Format::Heif => image::ImageFormat::Jpeg,
         Format::Tiff => image::ImageFormat::Tiff,
     });
     let mut limits = image::Limits::default();

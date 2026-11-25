@@ -8,6 +8,7 @@ pub mod decode;
 pub mod descriptor;
 pub mod faces;
 pub mod filters;
+pub mod heif;
 pub mod indexer;
 pub mod job;
 pub mod matching;
