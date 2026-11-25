@@ -71,6 +71,7 @@ pub enum Format {
     Png,
     WebP,
     Tiff,
+    Raw,
 }
 
 pub fn sniff(bytes: &[u8]) -> Option<Format> {
@@ -80,8 +81,10 @@ pub fn sniff(bytes: &[u8]) -> Option<Format> {
         Some(Format::Png)
     } else if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
         Some(Format::WebP)
+    } else if crate::raw::is_raw_container(bytes) {
+        Some(Format::Raw)
     } else if bytes.len() >= 4 && matches!(&bytes[0..4], b"II*\0" | b"MM\0*" | b"II+\0" | b"MM\0+") {
-        // Classic TIFF and BigTIFF, little- and big-endian.
+        // Classic TIFF and BigTIFF, little- and big-endian (also covers NEF/ARW/DNG/PEF/SRW).
         Some(Format::Tiff)
     } else {
         None
@@ -119,9 +122,42 @@ pub fn decode_file(path: &Path, min_short_side: Option<u32>) -> Result<Decoded> 
 pub fn decode_bytes(bytes: &[u8], min_short_side: Option<u32>) -> Result<Decoded> {
     match sniff(bytes) {
         Some(Format::Jpeg) => decode_jpeg(bytes, min_short_side),
+        Some(Format::Raw) => decode_raw_preview(bytes, min_short_side),
+        Some(Format::Tiff) => {
+            if let Some(preview) = crate::raw::extract_tiff_preview(bytes) {
+                return decode_raw_preview_slice(bytes, preview, min_short_side);
+            }
+            match decode_generic(bytes, Format::Tiff) {
+                Ok(d) => Ok(d),
+                Err(orig_err) => decode_raw_preview(bytes, min_short_side).map_err(|_| orig_err),
+            }
+        }
         Some(f) => decode_generic(bytes, f),
         None => bail!("unsupported format"),
     }
+}
+
+fn decode_raw_preview(bytes: &[u8], min_short_side: Option<u32>) -> Result<Decoded> {
+    let preview = crate::raw::extract_preview_jpeg(bytes)?;
+    decode_raw_preview_slice(bytes, preview, min_short_side)
+}
+
+fn decode_raw_preview_slice(container: &[u8], preview: &[u8], min_short_side: Option<u32>) -> Result<Decoded> {
+    let mut decoded = decode_jpeg(preview, min_short_side)?;
+    // Many TIFF-based RAW formats store EXIF orientation in the outer IFD0
+    // while leaving the embedded preview JPEG untagged (orientation = 1).
+    if decoded.info.exif_orientation <= 1 {
+        if let Some(o) = crate::raw::container_exif_orientation(container).filter(|&v| v > 1) {
+            let mut dynimg = DynamicImage::ImageRgb8(decoded.image);
+            dynimg.apply_orientation(exif_to_orientation(o));
+            let (fw, fh) = oriented_dims(decoded.info.full_width, decoded.info.full_height, o);
+            decoded.image = dynimg.into_rgb8();
+            decoded.info.full_width = fw;
+            decoded.info.full_height = fh;
+            decoded.info.exif_orientation = o;
+        }
+    }
+    Ok(decoded)
 }
 
 fn decode_jpeg(bytes: &[u8], min_short_side: Option<u32>) -> Result<Decoded> {
@@ -202,7 +238,7 @@ fn decode_generic(bytes: &[u8], f: Format) -> Result<Decoded> {
     reader.set_format(match f {
         Format::Png => image::ImageFormat::Png,
         Format::WebP => image::ImageFormat::WebP,
-        Format::Jpeg => image::ImageFormat::Jpeg,
+        Format::Jpeg | Format::Raw => image::ImageFormat::Jpeg,
         Format::Tiff => image::ImageFormat::Tiff,
     });
     let mut limits = image::Limits::default();
@@ -278,6 +314,19 @@ fn orientation_to_exif(o: Orientation) -> u8 {
         Orientation::Rotate90 => 6,
         Orientation::Rotate270FlipH => 7,
         Orientation::Rotate270 => 8,
+    }
+}
+
+fn exif_to_orientation(v: u8) -> Orientation {
+    match v {
+        2 => Orientation::FlipHorizontal,
+        3 => Orientation::Rotate180,
+        4 => Orientation::FlipVertical,
+        5 => Orientation::Rotate90FlipH,
+        6 => Orientation::Rotate90,
+        7 => Orientation::Rotate270FlipH,
+        8 => Orientation::Rotate270,
+        _ => Orientation::NoTransforms,
     }
 }
 
