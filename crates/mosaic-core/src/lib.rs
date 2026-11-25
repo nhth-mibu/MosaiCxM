@@ -14,6 +14,7 @@ pub mod matching;
 pub mod message;
 pub mod pool;
 pub mod project;
+pub mod raw;
 pub mod render;
 pub mod rng;
 pub mod saliency;

@@ -1529,7 +1529,7 @@ fn main() -> Result<()> {
         let (w, s) = (ui.as_weak(), st.clone());
         ui.on_browse_motif(move || {
             let ui = w.unwrap();
-            if let Some(p) = rfd::FileDialog::new().set_title("Choose the picture for your mosaic").add_filter("Images", &["jpg", "jpeg", "png", "webp", "tif", "tiff"]).pick_file() {
+            if let Some(p) = rfd::FileDialog::new().set_title("Choose the picture for your mosaic").add_filter("Images", IMAGE_EXTENSIONS).pick_file() {
                 show_motif(&ui, &p);
                 ui.set_motif_zoom(1.0);
                 ui.set_motif_pan_x(0.5);

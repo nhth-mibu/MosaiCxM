@@ -26,7 +26,10 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-pub const IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "jpe", "jfif", "png", "webp", "tif", "tiff"];
+pub const IMAGE_EXTENSIONS: &[&str] = &[
+    "jpg", "jpeg", "jpe", "jfif", "png", "webp", "tif", "tiff",
+    "cr2", "cr3", "nef", "nrw", "arw", "dng", "orf", "raf", "rw2", "pef", "srw", "rwl",
+];
 
 #[derive(Debug, Clone)]
 pub struct IndexOptions {
@@ -351,7 +354,17 @@ type AttributionPair = (Option<String>, Option<String>);
 
 /// Attribution (Artist, Copyright) and camera settings from EXIF, if present.
 pub fn read_exif(bytes: &[u8]) -> (AttributionPair, PhotoExif) {
-    let Ok(ex) = exif::Reader::new().read_from_container(&mut std::io::Cursor::new(bytes)) else { return ((None, None), PhotoExif::default()) };
+    let reader = exif::Reader::new();
+    let ex = match reader.read_from_container(&mut std::io::Cursor::new(bytes)) {
+        Ok(ex) => ex,
+        Err(_) => match crate::raw::extract_preview_jpeg(bytes)
+            .ok()
+            .and_then(|jpg| reader.read_from_container(&mut std::io::Cursor::new(jpg)).ok())
+        {
+            Some(ex) => ex,
+            None => return ((None, None), PhotoExif::default()),
+        },
+    };
     let num = |tag| {
         ex.get_field(tag, exif::In::PRIMARY).and_then(|f| match &f.value {
             exif::Value::Rational(v) if !v.is_empty() && v[0].denom != 0 => Some(v[0].to_f64()),

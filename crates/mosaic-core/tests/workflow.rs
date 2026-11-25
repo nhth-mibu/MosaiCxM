@@ -346,6 +346,45 @@ fn saliency_cached_during_indexing_and_loaded_into_pool() {
 }
 
 #[test]
+fn camera_raw_files_index_match_and_export() {
+    let e = env();
+    let dir = e.root.join("raws");
+    std::fs::create_dir_all(&dir).unwrap();
+    // Write 4 synthetic Fujifilm RAF files with embedded JPEGs of distinct colours.
+    for (i, rgb) in [[210u8, 40, 40], [40, 200, 50], [40, 60, 215], [230, 210, 40]].into_iter().enumerate() {
+        let jpg = mosaic_core::decode::encode_jpeg(&RgbImage::from_pixel(160, 120, image::Rgb(rgb)), 90).unwrap();
+        let mut raf = vec![0u8; 0x80];
+        raf[..16].copy_from_slice(b"FUJIFILMCCD-RAW ");
+        let off = raf.len() as u32;
+        raf[0x54..0x58].copy_from_slice(&off.to_be_bytes());
+        raf[0x58..0x5C].copy_from_slice(&(jpg.len() as u32).to_be_bytes());
+        raf.extend_from_slice(&jpg);
+        std::fs::write(dir.join(format!("shot_{i}.raf")), raf).unwrap();
+    }
+    let lib = e.cat.create_library("raws").unwrap();
+    e.cat.add_root(lib, &dir).unwrap();
+    let r = update_library(&e.cat, lib, &opts(), &Job::default()).unwrap();
+    assert_eq!(r.decoded, 4);
+    assert!(r.skipped.is_empty());
+
+    let pool = Pool::load(&e.cat, &[lib], true).unwrap();
+    let grid = GridSpec::new(100.0, 100.0, 2, 2).unwrap();
+    let mpath = e.root.join("motif_raw.raf");
+    std::fs::copy(dir.join("shot_0.raf"), &mpath).unwrap();
+    let (target, mref) = load_target(&mpath, &grid).unwrap();
+    let proj = Project::create(&pool, libraries_refs(&e.cat, &[lib]).unwrap(), &target, mref, grid, MatchSettings::for_method(Method::Classic), &Job::default()).unwrap();
+    let prev = mosaic_core::render::render_preview(&e.cat, &proj, 16, &Job::default()).unwrap();
+    assert_eq!(prev.dimensions(), (32, 32));
+    let chk = check_sources(&e.cat, &proj, &Job::default()).unwrap();
+    assert!(chk.ok());
+    let src = FileSource { paths: chk.resolved.into_iter().map(|p| p.unwrap()).collect() };
+    let out = e.root.join("raw_export.png");
+    let plan = plan_raster(&proj, 72.0, RasterFormat::Png).unwrap();
+    let rep = export_raster(&proj, &src, &plan, &out, &Job::default()).unwrap();
+    assert!(rep.bytes > 0);
+}
+
+#[test]
 fn document_decisions_ignore_old_cache_and_separate_models_and_failures() {
     use mosaic_core::filters::{DocumentClassifier, PhotoFilters};
     use std::cell::Cell;
