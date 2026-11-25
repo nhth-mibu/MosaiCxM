@@ -471,6 +471,8 @@ fn run(cli: Cli, cancel: Arc<AtomicBool>) -> Result<()> {
                             *cover = true;
                         }
                         s
+                    } else if name.eq_ignore_ascii_case("cutout") {
+                        Shape::cutout(&a.motif, a.shape_invert)?
                     } else { Shape::parse(name, a.shape_invert)? };
                     let o = Outline { shape, background: parse_hex_color(&a.background)?, threshold: a.shape_threshold };
                     o.validate()?;

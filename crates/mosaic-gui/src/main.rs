@@ -347,6 +347,13 @@ fn read_outline(ui: &AppWindow) -> Result<Option<Outline>> {
             }
             Shape::from_file(Path::new(f.as_str()), ui.get_shape_invert())?
         }
+        7 => {
+            let m = ui.get_motif_path();
+            if m.is_empty() {
+                bail!("choose a picture in step 2 first to cut out its subject");
+            }
+            Shape::cutout(Path::new(m.as_str()), ui.get_shape_invert())?
+        }
         _ => return Ok(None),
     };
     let bg = BACKGROUNDS[ui.get_shape_background_index().clamp(0, 2) as usize];
@@ -365,6 +372,10 @@ fn show_outline(ui: &AppWindow, o: Option<&Outline>) {
             ui.set_shape_index(6);
             ui.set_shape_file(path.display().to_string().into());
             ui.set_shape_file_name(file_name(path).into());
+            ui.set_shape_invert(*invert);
+        }
+        Shape::Cutout { invert, .. } => {
+            ui.set_shape_index(7);
             ui.set_shape_invert(*invert);
         }
         s => ui.set_shape_index(SHAPES.iter().position(|x| x == s).map(|p| p as i32 + 1).unwrap_or(0)),
@@ -399,13 +410,17 @@ fn update_grid_info(ui: &AppWindow, st: &State) {
             let (tw, th) = g.tile_mm();
             let mut t = format!("{} × {} = {} tiles of {:.0} × {:.0} mm. Looks best from about {:.0} m away.", g.cols, g.rows, thousands(g.tiles() as u64), tw, th, viewing_distance_m(tw.max(th)));
             let mut placed = g.tiles() as u64;
-            match read_outline(ui).and_then(|o| o.map(|o| o.active_tiles(&g)).transpose()) {
-                Ok(Some(a)) => {
-                    placed = a.iter().filter(|&&x| x).count() as u64;
-                    t += &format!(" {} tiles are inside the shape.", thousands(placed));
+            if ui.get_shape_index() == 7 {
+                t += " Subject cutout is computed automatically when making the preview.";
+            } else {
+                match read_outline(ui).and_then(|o| o.map(|o| o.active_tiles(&g)).transpose()) {
+                    Ok(Some(a)) => {
+                        placed = a.iter().filter(|&&x| x).count() as u64;
+                        t += &format!(" {} tiles are inside the shape.", thousands(placed));
+                    }
+                    Ok(None) => {}
+                    Err(e) => t += &format!(" Shape: {e:#}."),
                 }
-                Ok(None) => {}
-                Err(e) => t += &format!(" Shape: {e:#}."),
             }
             if photos > 0 {
                 if let Some(m) = s.max_reuse {
@@ -1594,6 +1609,52 @@ fn main() -> Result<()> {
             };
             update_grid_info(&ui, &s.lock().unwrap());
             picked
+        });
+    }
+    {
+        let (w, s) = (ui.as_weak(), st.clone());
+        ui.on_generate_ai_shape(move || {
+            let ui = w.unwrap();
+            if ui.get_busy() { return; }
+            let prompt = ui.get_ai_shape_prompt().to_string();
+            let config = match read_classifier(&ui) {
+                Ok(c) => c,
+                Err(e) => {
+                    ui.set_ai_shape_status(format!("Configure an AI model in Step 1 first ({e:#}).").into());
+                    return;
+                }
+            };
+            ui.set_ai_shape_status(format!("Asking {} to draw \"{}\"…", config.label(), prompt.trim()).into());
+            run_job(&ui, &s, "Generating SVG shape", move |job, dd| {
+                let svg = config.generate_svg(&prompt, job)?;
+                let dir = dd.join("generated-shapes");
+                std::fs::create_dir_all(&dir)?;
+                let slug: String = prompt
+                    .trim()
+                    .chars()
+                    .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' })
+                    .collect::<String>()
+                    .trim_matches('-')
+                    .chars()
+                    .take(32)
+                    .collect();
+                let slug = if slug.is_empty() { "shape".to_string() } else { slug };
+                let mut h: u64 = 0xcbf29ce484222325;
+                for &b in svg.as_bytes() {
+                    h = (h ^ b as u64).wrapping_mul(0x100000001b3);
+                }
+                let path = dir.join(format!("{slug}-{:08x}.svg", h as u32));
+                std::fs::write(&path, svg.as_bytes())?;
+                Ok(Box::new(move |ui: &AppWindow, s: &mut State| {
+                    let name = file_name(&path);
+                    ui.set_shape_file(path.display().to_string().into());
+                    ui.set_shape_file_name(name.clone().into());
+                    ui.set_shape_index(6);
+                    ui.set_ai_shape_status(format!("Generated {name}. Click Make preview to apply.").into());
+                    mark_stale(ui);
+                    update_grid_info(ui, s);
+                }))
+            });
         });
     }
     {
