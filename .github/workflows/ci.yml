@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Test workspace (Linux)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libfontconfig1-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libwayland-dev libx11-dev libxcursor-dev libxi-dev libxrandr-dev libgtk-3-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ci-linux
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Test mosaic-core and mosaic CLI (release)
+        run: cargo test --release --locked -p mosaic-core -p mosaic
+
+      - name: Test mosaic-gui (Slint UI & vision)
+        run: |
+          cargo test --locked -p mosaic-gui -- --test-threads=1 --skip model_panel_fields_fill_sidebar_and_status_stays_inside_card
+          cargo test --locked -p mosaic-gui -- --exact tests::model_panel_fields_fill_sidebar_and_status_stays_inside_card
+
+      - name: Check release build of all workspace targets
+        run: cargo check --release --locked --workspace --all-targets
