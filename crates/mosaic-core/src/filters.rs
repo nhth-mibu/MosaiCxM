@@ -31,6 +31,17 @@ pub enum People {
     NoPeople,
 }
 
+impl People {
+    pub fn parse(s: &str) -> Result<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "any" | "all" => Ok(Self::Any),
+            "portraits" | "people" => Ok(Self::Portraits),
+            "no-people" | "no_people" | "none" => Ok(Self::NoPeople),
+            _ => bail!("unknown people filter '{s}' (any, portraits, no-people)"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Colour {
@@ -40,20 +51,102 @@ pub enum Colour {
     BlackAndWhite,
 }
 
+impl Colour {
+    pub fn parse(s: &str) -> Result<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "any" | "all" => Ok(Self::Any),
+            "colour" | "color" => Ok(Self::Colour),
+            "bw" | "b&w" | "black-and-white" | "black_and_white" | "monochrome" => Ok(Self::BlackAndWhite),
+            _ => bail!("unknown colour filter '{s}' (any, colour, bw)"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PhotoFilters {
     pub people: People,
     pub colour: Colour,
     pub skip_documents: bool,
+    /// Earliest EXIF taken date to keep (`YYYY`, `YYYY-MM`, or `YYYY-MM-DD`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub date_from: Option<String>,
+    /// Latest EXIF taken date to keep (`YYYY`, `YYYY-MM`, or `YYYY-MM-DD`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub date_to: Option<String>,
+    /// Keep photos whose EXIF camera name contains this text (case-insensitive).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub camera: Option<String>,
+    /// Keep photos whose EXIF lens name contains this text (case-insensitive).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lens: Option<String>,
+}
+
+fn non_empty(o: &Option<String>) -> Option<&str> {
+    o.as_deref().map(str::trim).filter(|s| !s.is_empty())
+}
+
+/// Parses `YYYY`, `YYYY-MM`, or `YYYY-MM-DD` (also accepting `:` or `/`) into `YYYY-MM-DD`.
+pub fn parse_date_bound(s: &str, end: bool) -> Result<String> {
+    let norm = s.trim().replace([':', '/'], "-");
+    let parts: Vec<&str> = norm.split('-').collect();
+    let parse_u = |p: &str, min_len: usize, max_len: usize| -> Option<u32> {
+        if p.len() < min_len || p.len() > max_len || !p.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        p.parse().ok()
+    };
+    let (y, m, d) = match parts.as_slice() {
+        [y] => (parse_u(y, 4, 4), Some(if end { 12 } else { 1 }), Some(if end { 31 } else { 1 })),
+        [y, m] => (parse_u(y, 4, 4), parse_u(m, 1, 2), Some(if end { 31 } else { 1 })),
+        [y, m, d] => (parse_u(y, 4, 4), parse_u(m, 1, 2), parse_u(d, 1, 2)),
+        _ => (None, None, None),
+    };
+    match (y, m, d) {
+        (Some(y), Some(m @ 1..=12), Some(d @ 1..=31)) if y > 0 => Ok(format!("{y:04}-{m:02}-{d:02}")),
+        _ => bail!("date '{}' must be YYYY, YYYY-MM or YYYY-MM-DD", s.trim()),
+    }
+}
+
+fn exif_date_ymd(taken: &str) -> Option<String> {
+    let t = taken.trim();
+    let num = |a: usize, b: usize| t.get(a..b).and_then(|s| s.parse::<u32>().ok());
+    match (num(0, 4), num(5, 7), num(8, 10)) {
+        (Some(y), Some(m @ 1..=12), Some(d @ 1..=31)) if y > 0 => Some(format!("{y:04}-{m:02}-{d:02}")),
+        _ => None,
+    }
 }
 
 impl PhotoFilters {
+    pub fn has_exif_filter(&self) -> bool {
+        non_empty(&self.date_from).is_some()
+            || non_empty(&self.date_to).is_some()
+            || non_empty(&self.camera).is_some()
+            || non_empty(&self.lens).is_some()
+    }
+
+    pub fn is_default(&self) -> bool {
+        self.people == People::Any && self.colour == Colour::Any && !self.skip_documents && !self.has_exif_filter()
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        let from = non_empty(&self.date_from).map(|s| parse_date_bound(s, false)).transpose()?;
+        let to = non_empty(&self.date_to).map(|s| parse_date_bound(s, true)).transpose()?;
+        if let (Some(a), Some(b)) = (&from, &to) {
+            if a > b {
+                bail!("start date ({}) must not be after end date ({})", self.date_from.as_deref().unwrap_or(""), self.date_to.as_deref().unwrap_or(""));
+            }
+        }
+        Ok(())
+    }
+
     pub fn apply(&self, pool: &Pool, cat: &Catalog, libs: &[i64], merge: bool, job: &Job) -> Result<Pool> {
         self.apply_with_classifier(pool, cat, libs, merge, None, job)
     }
 
     pub fn apply_with_classifier(&self, pool: &Pool, cat: &Catalog, libs: &[i64], merge: bool, classifier: Option<&dyn DocumentClassifier>, job: &Job) -> Result<Pool> {
+        self.validate()?;
+        let exif_allowed = if self.has_exif_filter() { Some(exif_matching_hashes(cat, libs, self)?) } else { None };
         let screenshots = if self.skip_documents { screenshot_hashes(cat, libs)? } else { HashSet::new() };
         let offline_key = format!("offline:{DOCUMENT_VERSION}");
         let cache_key = if self.skip_documents {
@@ -74,6 +167,9 @@ impl PhotoFilters {
                 job.report("filtering source photos (reusing saved checks)", i as u64, pool.photos.len() as u64);
             }
             if !self.allows(p) { continue; }
+            if let Some(allowed) = &exif_allowed {
+                if !allowed.contains(&p.hash) { continue; }
+            }
             if self.skip_documents {
                 if screenshots.contains(&p.hash) { continue; }
                 let cached = cached_document(cat, &p.hash, &cache_key)?.map(|v| (v, cache_key != offline_key));
@@ -112,7 +208,7 @@ impl PhotoFilters {
             if unreadable > 0 {
                 bail!("cannot inspect unchanged original photos for the document filter; reconnect or rescan your folders, or turn off Skip likely documents/screenshots");
             }
-            bail!("no photos match these filters; choose All photos / All colours, turn off Skip likely documents/screenshots, or add more photos");
+            bail!("no photos match these filters; relax the people, colour, date/camera or document filters, or add more photos");
         }
         job.check()?;
         let mut out = Pool { photos, group_count: 0 };
@@ -133,6 +229,50 @@ impl PhotoFilters {
         };
         people && colour
     }
+}
+
+fn exif_matching_hashes(cat: &Catalog, libs: &[i64], f: &PhotoFilters) -> Result<HashSet<Hash>> {
+    if libs.is_empty() {
+        return Ok(HashSet::new());
+    }
+    let from = non_empty(&f.date_from).map(|s| parse_date_bound(s, false)).transpose()?;
+    let to = non_empty(&f.date_to).map(|s| parse_date_bound(s, true)).transpose()?;
+    let cam = non_empty(&f.camera).map(|s| s.to_lowercase());
+    let lens = non_empty(&f.lens).map(|s| s.to_lowercase());
+    let ids = libs.iter().map(i64::to_string).collect::<Vec<_>>().join(",");
+    let mut stmt = cat.conn.prepare(&format!(
+        "SELECT f.content_hash, f.taken, f.camera, f.lens FROM file f JOIN root r ON r.id = f.root_id WHERE f.status = 0 AND r.library_id IN ({ids})"
+    ))?;
+    let rows = stmt.query_map([], |r| {
+        Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, Option<String>>(2)?, r.get::<_, Option<String>>(3)?))
+    })?;
+    let mut out = HashSet::new();
+    for row in rows {
+        let (hash, taken, camera, photo_lens) = row?;
+        if from.is_some() || to.is_some() {
+            let Some(ymd) = taken.as_deref().and_then(exif_date_ymd) else { continue };
+            if let Some(a) = &from {
+                if ymd < *a { continue; }
+            }
+            if let Some(b) = &to {
+                if ymd > *b { continue; }
+            }
+        }
+        if let Some(needle) = &cam {
+            if !camera.as_deref().is_some_and(|c| c.to_lowercase().contains(needle)) {
+                continue;
+            }
+        }
+        if let Some(needle) = &lens {
+            if !photo_lens.as_deref().is_some_and(|l| l.to_lowercase().contains(needle)) {
+                continue;
+            }
+        }
+        if let Ok(h) = hash.try_into() {
+            out.insert(h);
+        }
+    }
+    Ok(out)
 }
 
 fn cached_document(cat: &Catalog, hash: &Hash, key: &str) -> Result<Option<bool>> {
@@ -260,7 +400,7 @@ mod tests {
         let gray = RgbImage::from_pixel(100, 100, image::Rgb([110, 110, 110]));
         let colour = RgbImage::from_pixel(100, 100, image::Rgb([200, 40, 20]));
         let p = Pool::from_rows(vec![PoolRow { hash: [1; 32], width: 100, height: 100, grid: descriptor::compute(&gray, 100, 100).grid, dhash: 0, faces: vec![Face { rect: [0.3, 0.2, 0.3, 0.3], score: 1.0 }] }], false);
-        let mut f = PhotoFilters { people: People::Portraits, colour: Colour::BlackAndWhite, skip_documents: false };
+        let mut f = PhotoFilters { people: People::Portraits, colour: Colour::BlackAndWhite, skip_documents: false, ..Default::default() };
         assert!(f.allows(&p.photos[0]));
         f.colour = Colour::Colour;
         assert!(!f.allows(&p.photos[0]));
@@ -271,6 +411,22 @@ mod tests {
         assert!(!f.allows(&photo));
         photo.faces.clear();
         assert!(f.allows(&photo));
+    }
+
+    #[test]
+    fn date_bounds_parse_and_validate() {
+        assert_eq!(parse_date_bound("2023", false).unwrap(), "2023-01-01");
+        assert_eq!(parse_date_bound("2023", true).unwrap(), "2023-12-31");
+        assert_eq!(parse_date_bound("2023-7", false).unwrap(), "2023-07-01");
+        assert_eq!(parse_date_bound("2023/07/14", false).unwrap(), "2023-07-14");
+        assert!(parse_date_bound("2023-13-01", false).is_err());
+        assert!(parse_date_bound("yesterday", false).is_err());
+        assert_eq!(exif_date_ymd("2023:07:14 15:02:11").as_deref(), Some("2023-07-14"));
+        assert_eq!(exif_date_ymd("0000:00:00 00:00:00"), None);
+        let bad = PhotoFilters { date_from: Some("2025".into()), date_to: Some("2024".into()), ..Default::default() };
+        assert!(bad.validate().is_err());
+        let ok = PhotoFilters { date_from: Some("2022".into()), date_to: Some("2024-06".into()), ..Default::default() };
+        assert!(ok.validate().is_ok());
     }
 
     #[test]

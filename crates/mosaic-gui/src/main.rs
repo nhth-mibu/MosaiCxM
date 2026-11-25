@@ -10,7 +10,7 @@
 #![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
 
 use anyhow::{anyhow, bail, Context, Result};
-use mosaic_core::catalog::{Catalog, LibraryInfo};
+use mosaic_core::catalog::{hash_file, hex, unhex, Catalog, LibraryInfo};
 use mosaic_core::export::{export_raster, plan_raster, RasterFormat};
 use mosaic_core::filters::{Colour, People, PhotoFilters, DocumentClassifier};
 use mosaic_core::decode::{decode_file, resize_crop};
@@ -84,6 +84,8 @@ struct State {
     /// The photo of the tile the user clicked, if its box is open.
     picked: Option<Picked>,
     picked_gen: u64,
+    /// Photos guaranteed to appear in the mosaic: (hex content hash, display name).
+    must_include: Vec<(String, String)>,
 }
 
 struct CachedPool {
@@ -272,7 +274,12 @@ fn num(s: SharedString, what: &str) -> Result<f64> {
     s.trim().replace(',', ".").parse::<f64>().with_context(|| format!("{what} must be a number"))
 }
 
-fn read_settings(ui: &AppWindow) -> Result<(GridSpec, MatchSettings)> {
+fn sync_must_include(ui: &AppWindow, s: &State) {
+    let names: Vec<SharedString> = s.must_include.iter().map(|(_, n)| SharedString::from(n.as_str())).collect();
+    ui.set_must_include_names(ModelRc::new(VecModel::from(names)));
+}
+
+fn read_settings(ui: &AppWindow, st: &State) -> Result<(GridSpec, MatchSettings)> {
     let (w, h) = (num(ui.get_width_mm(), "Width")?, num(ui.get_height_mm(), "Height")?);
     let grid = if ui.get_use_grid() {
         GridSpec::new(w, h, ui.get_cols().max(1) as u32, ui.get_rows().max(1) as u32)?
@@ -288,11 +295,20 @@ fn read_settings(ui: &AppWindow) -> Result<(GridSpec, MatchSettings)> {
     s.crop_offsets = ui.get_crop_offsets();
     s.face_crop = ui.get_face_crop();
     s.seed = ui.get_seed().max(0) as u64;
+    let opt_str = |v: SharedString| {
+        let t = v.trim();
+        if t.is_empty() { None } else { Some(t.to_string()) }
+    };
     s.photo_filters = PhotoFilters {
         people: match ui.get_people_filter() { 1 => People::Portraits, 2 => People::NoPeople, _ => People::Any },
         colour: match ui.get_colour_filter() { 1 => Colour::Colour, 2 => Colour::BlackAndWhite, _ => Colour::Any },
         skip_documents: ui.get_skip_documents(),
+        date_from: opt_str(ui.get_date_from()),
+        date_to: opt_str(ui.get_date_to()),
+        camera: opt_str(ui.get_camera_filter()),
+        lens: opt_str(ui.get_lens_filter()),
     };
+    s.must_include = st.must_include.iter().map(|(h, _)| h.clone()).collect();
     s.color_correction = ui.get_color_correction();
     s.motif_blend = ui.get_motif_blend();
     let text = ui.get_hidden_message();
@@ -367,7 +383,7 @@ fn viewing_distance_m(tile_mm: f64) -> f64 {
 
 fn update_grid_info(ui: &AppWindow, st: &State) {
     let style = ["Sharp", "Balanced", "Varied"][ui.get_style_index().clamp(0, 2) as usize];
-    match read_settings(ui) {
+    match read_settings(ui, st) {
         Ok((g, s)) => {
             let photos: u64 = st.libs.iter().filter(|l| !st.excluded.contains(&l.id)).map(|l| l.distinct_photos).sum();
             let (tw, th) = g.tile_mm();
@@ -419,7 +435,7 @@ fn load_pool(st: &Shared, cat: &Catalog, libs: &[i64], settings: &MatchSettings,
         }
     }
     let p = Pool::load(cat, libs, merge)?;
-    let p = Arc::new(if settings.photo_filters == PhotoFilters::default() { p } else { settings.photo_filters.apply_with_classifier(&p, cat, libs, merge, classifier.as_ref().map(|c| c as &dyn DocumentClassifier), job)? });
+    let p = Arc::new(if settings.photo_filters.is_default() { p } else { settings.photo_filters.apply_with_classifier(&p, cat, libs, merge, classifier.as_ref().map(|c| c as &dyn DocumentClassifier), job)? });
     st.lock().unwrap().pool = Some(CachedPool { libraries: libs.to_vec(), merge, filters: settings.photo_filters.clone(), classifier: classifier_key, pool: p.clone() });
     Ok(p)
 }
@@ -623,6 +639,24 @@ fn show_project(ui: &AppWindow, s: &mut State, p: Project, buf: SharedPixelBuffe
         ui.set_people_filter(match p.settings.photo_filters.people { People::Any => 0, People::Portraits => 1, People::NoPeople => 2 });
         ui.set_colour_filter(match p.settings.photo_filters.colour { Colour::Any => 0, Colour::Colour => 1, Colour::BlackAndWhite => 2 });
         ui.set_skip_documents(p.settings.photo_filters.skip_documents);
+        ui.set_date_from(p.settings.photo_filters.date_from.as_deref().unwrap_or("").into());
+        ui.set_date_to(p.settings.photo_filters.date_to.as_deref().unwrap_or("").into());
+        ui.set_camera_filter(p.settings.photo_filters.camera.as_deref().unwrap_or("").into());
+        ui.set_lens_filter(p.settings.photo_filters.lens.as_deref().unwrap_or("").into());
+        let libs: Vec<i64> = p.libraries.iter().map(|l| l.id).collect();
+        let cat = Catalog::open(&s.data_dir).ok();
+        s.must_include = p.settings.must_include.iter().map(|hx| {
+            let label = unhex(hx)
+                .ok()
+                .and_then(|h| cat.as_ref().and_then(|c| c.locations(&h, &libs).ok()))
+                .and_then(|locs| locs.into_iter().next().map(|l| file_name(&l.path)))
+                .unwrap_or_else(|| hx.chars().take(12).collect());
+            (hx.clone(), label)
+        }).collect();
+        sync_must_include(ui, s);
+        if p.settings.photo_filters.has_exif_filter() || !s.must_include.is_empty() {
+            ui.set_show_extra_filters(true);
+        }
         ui.set_color_correction(p.settings.color_correction);
         ui.set_motif_blend(p.settings.motif_blend);
         let hm = p.settings.hidden_message.as_ref();
@@ -1377,6 +1411,87 @@ fn main() -> Result<()> {
             }
         });
     }
+    {
+        let (w, s) = (ui.as_weak(), st.clone());
+        ui.on_add_must_include(move || {
+            let ui = w.unwrap();
+            if ui.get_busy() { return; }
+            let libs = match selected_libs(&s.lock().unwrap()) {
+                Ok(l) => l,
+                Err(e) => return report_error(&ui, e),
+            };
+            let Some(paths) = rfd::FileDialog::new()
+                .set_title("Choose photos that must appear in the mosaic")
+                .add_filter("Images", IMAGE_EXTENSIONS)
+                .pick_files()
+            else { return };
+            if paths.is_empty() { return; }
+            run_job(&ui, &s, "Checking must-include photos", move |job, dd| {
+                let cat = Catalog::open(&dd)?;
+                let mut added: Vec<(String, String)> = Vec::new();
+                let mut missing: Vec<String> = Vec::new();
+                for (i, path) in paths.iter().enumerate() {
+                    job.check()?;
+                    job.report("Checking must-include photos", i as u64, paths.len() as u64);
+                    let h = hash_file(path)?;
+                    if cat.locations(&h, &libs)?.is_empty() {
+                        missing.push(file_name(path));
+                    } else {
+                        added.push((hex(&h), file_name(path)));
+                    }
+                }
+                Ok(Box::new(move |ui: &AppWindow, s: &mut State| {
+                    let mut count = 0usize;
+                    for (hx, name) in added {
+                        if !s.must_include.iter().any(|(existing, _)| existing == &hx) {
+                            s.must_include.push((hx, name));
+                            count += 1;
+                        }
+                    }
+                    sync_must_include(ui, s);
+                    if count > 0 {
+                        mark_stale(ui);
+                        update_grid_info(ui, s);
+                    }
+                    if !missing.is_empty() {
+                        ui.set_notice(format!(
+                            "Skipped {} photo(s) not found in your added folders: {}. Add their folder in step 1 first.",
+                            missing.len(),
+                            missing.join(", ")
+                        ).into());
+                    } else if count > 0 {
+                        ui.set_status(format!("Added {count} must-include photo(s).").into());
+                    }
+                }))
+            });
+        });
+    }
+    {
+        let (w, s) = (ui.as_weak(), st.clone());
+        ui.on_remove_must_include(move |i| {
+            let ui = w.unwrap();
+            let mut st = s.lock().unwrap();
+            if (i as usize) < st.must_include.len() {
+                st.must_include.remove(i as usize);
+                sync_must_include(&ui, &st);
+                mark_stale(&ui);
+                update_grid_info(&ui, &st);
+            }
+        });
+    }
+    {
+        let (w, s) = (ui.as_weak(), st.clone());
+        ui.on_clear_must_include(move || {
+            let ui = w.unwrap();
+            let mut st = s.lock().unwrap();
+            if !st.must_include.is_empty() {
+                st.must_include.clear();
+                sync_must_include(&ui, &st);
+                mark_stale(&ui);
+                update_grid_info(&ui, &st);
+            }
+        });
+    }
 
     // ---------------- 2 Picture
     {
@@ -1426,9 +1541,12 @@ fn main() -> Result<()> {
             if ui.get_busy() {
                 return;
             }
-            let (libs, (grid, settings)) = match (selected_libs(&s.lock().unwrap()), read_settings(&ui)) {
-                (Ok(l), Ok(x)) => (l, x),
-                (Err(e), _) | (_, Err(e)) => return report_error(&ui, e),
+            let (libs, (grid, settings)) = {
+                let st = s.lock().unwrap();
+                match (selected_libs(&st), read_settings(&ui, &st)) {
+                    (Ok(l), Ok(x)) => (l, x),
+                    (Err(e), _) | (_, Err(e)) => return report_error(&ui, e),
+                }
             };
             let folder = ui.get_suggest_folder().to_string();
             let n_lib = ui.get_suggest_from_library().max(0) as usize;
@@ -1523,9 +1641,12 @@ fn main() -> Result<()> {
             if ui.get_busy() {
                 return;
             }
-            let (libs, (grid, settings)) = match (selected_libs(&s.lock().unwrap()), read_settings(&ui)) {
-                (Ok(l), Ok(x)) => (l, x),
-                (Err(e), _) | (_, Err(e)) => return report_error(&ui, e),
+            let (libs, (grid, settings)) = {
+                let st = s.lock().unwrap();
+                match (selected_libs(&st), read_settings(&ui, &st)) {
+                    (Ok(l), Ok(x)) => (l, x),
+                    (Err(e), _) | (_, Err(e)) => return report_error(&ui, e),
+                }
             };
             let outline = match read_outline(&ui) {
                 Ok(o) => o,
@@ -2050,7 +2171,7 @@ mod tests {
         ui.set_model_api_key("fake-test-key".into());
         ui.invoke_enable_model();
         assert!(ui.get_model_active());
-        let serialized = serde_json::to_string(&read_settings(&ui).unwrap().1).unwrap();
+        let serialized = serde_json::to_string(&read_settings(&ui, &state.lock().unwrap()).unwrap().1).unwrap();
         assert!(!serialized.contains("fake-test-key"));
         assert!(!serialized.contains("api.openai.com"), "project settings must not restore a connection");
         let restarted = AppWindow::new().unwrap();
@@ -2114,8 +2235,27 @@ mod tests {
         ui.set_people_filter(1);
         ui.set_colour_filter(2);
         ui.set_skip_documents(true);
-        let settings = super::read_settings(&ui).unwrap().1;
-        assert_eq!(settings.photo_filters, super::PhotoFilters { people: super::People::Portraits, colour: super::Colour::BlackAndWhite, skip_documents: true });
+        ui.set_date_from("2023-01".into());
+        ui.set_date_to("2024".into());
+        ui.set_camera_filter("Fuji".into());
+        ui.set_lens_filter("35mm".into());
+        let mut st = super::State::default();
+        let hero_hex = super::hex(&[0xab; 32]);
+        st.must_include.push((hero_hex.clone(), "hero.jpg".into()));
+        let settings = super::read_settings(&ui, &st).unwrap().1;
+        assert_eq!(
+            settings.photo_filters,
+            super::PhotoFilters {
+                people: super::People::Portraits,
+                colour: super::Colour::BlackAndWhite,
+                skip_documents: true,
+                date_from: Some("2023-01".into()),
+                date_to: Some("2024".into()),
+                camera: Some("Fuji".into()),
+                lens: Some("35mm".into()),
+            }
+        );
+        assert_eq!(settings.must_include, vec![hero_hex]);
         let selections = Rc::new(Cell::new(0));
         let count = selections.clone();
         ui.on_new_selection(move || count.set(count.get() + 1));

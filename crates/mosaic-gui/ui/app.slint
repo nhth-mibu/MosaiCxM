@@ -916,6 +916,12 @@ export component AppWindow inherits Window {
     in-out property <int> people-filter: 0;
     in-out property <int> colour-filter: 0;
     in-out property <bool> skip-documents: false;
+    in-out property <bool> show-extra-filters: false;
+    in-out property <string> date-from;
+    in-out property <string> date-to;
+    in-out property <string> camera-filter;
+    in-out property <string> lens-filter;
+    in-out property <[string]> must-include-names;
     private property <bool> show-model-setup: false;
     in-out property <int> model-provider: 0;
     in-out property <string> model-endpoint: "http://localhost:11434/v1";
@@ -1237,6 +1243,9 @@ export component AppWindow inherits Window {
     callback find-folder(int);
     callback toggle-collection(int, bool);
     callback show-skipped();
+    callback add-must-include();
+    callback remove-must-include(int);
+    callback clear-must-include();
     callback model-provider-changed();
     callback model-config-changed();
     callback enable-model();
@@ -1493,6 +1502,101 @@ export component AppWindow inherits Window {
                                         text: "Skip likely documents/screenshots";
                                         checked <=> root.skip-documents;
                                         toggled => { root.changed(); }
+                                    }
+                                }
+                                LinkButton {
+                                    text: (root.show-extra-filters ? "▾" : "▸") + " Date, camera & must-include photos"
+                                        + (root.must-include-names.length > 0 ? " (" + root.must-include-names.length + ")" : "");
+                                    clicked => { root.show-extra-filters = !root.show-extra-filters; }
+                                }
+                                if root.show-extra-filters: Rectangle {
+                                    background: Theme.surface;
+                                    border-color: Theme.line;
+                                    border-width: 1px;
+                                    border-radius: 8px;
+                                    min-height: extra-filters-form.preferred-height;
+                                    extra-filters-form := VerticalLayout {
+                                        padding: 10px;
+                                        spacing: 8px;
+                                        alignment: start;
+                                        HorizontalLayout {
+                                            spacing: 8px;
+                                            StackedField {
+                                                horizontal-stretch: 1;
+                                                label: "From date";
+                                                tip: "Only use photos taken on or after this EXIF date (YYYY, YYYY-MM, or YYYY-MM-DD).";
+                                                LineEdit {
+                                                    text <=> root.date-from;
+                                                    placeholder-text: "e.g. 2023-06";
+                                                    enabled: !root.busy;
+                                                    edited => { root.changed(); }
+                                                }
+                                            }
+                                            StackedField {
+                                                horizontal-stretch: 1;
+                                                label: "To date";
+                                                tip: "Only use photos taken on or before this EXIF date (YYYY, YYYY-MM, or YYYY-MM-DD).";
+                                                LineEdit {
+                                                    text <=> root.date-to;
+                                                    placeholder-text: "e.g. 2024-12-31";
+                                                    enabled: !root.busy;
+                                                    edited => { root.changed(); }
+                                                }
+                                            }
+                                        }
+                                        StackedField {
+                                            label: "Camera contains";
+                                            tip: "Match a substring of the EXIF camera make or model (case-insensitive), e.g. Fuji, iPhone, EOS.";
+                                            LineEdit {
+                                                text <=> root.camera-filter;
+                                                placeholder-text: "Any camera";
+                                                enabled: !root.busy;
+                                                edited => { root.changed(); }
+                                            }
+                                        }
+                                        StackedField {
+                                            label: "Lens contains";
+                                            tip: "Match a substring of the EXIF lens name (case-insensitive), e.g. 50mm, 24-70.";
+                                            LineEdit {
+                                                text <=> root.lens-filter;
+                                                placeholder-text: "Any lens";
+                                                enabled: !root.busy;
+                                                edited => { root.changed(); }
+                                            }
+                                        }
+                                        Text { text: "Must-include photos"; color: Theme.fg; font-size: 12px; font-weight: 600; }
+                                        Text {
+                                            text: "Guaranteed to appear at least once at their best matching tile (must be in your added folders).";
+                                            color: Theme.muted;
+                                            font-size: 11px;
+                                            wrap: word-wrap;
+                                            min-height: self.preferred-height;
+                                        }
+                                        for name[i] in root.must-include-names: HorizontalLayout {
+                                            spacing: 6px;
+                                            Text { text: name; color: Theme.fg; font-size: 12px; overflow: elide; horizontal-stretch: 1; vertical-alignment: center; }
+                                            LinkButton {
+                                                text: "Remove";
+                                                vertical-alignment: center;
+                                                enabled: !root.busy;
+                                                clicked => { root.remove-must-include(i); }
+                                            }
+                                        }
+                                        HorizontalLayout {
+                                            spacing: 8px;
+                                            alignment: start;
+                                            Button {
+                                                text: "+ Choose photos…";
+                                                enabled: !root.busy;
+                                                clicked => { root.add-must-include(); }
+                                            }
+                                            if root.must-include-names.length > 0: LinkButton {
+                                                text: "Clear all";
+                                                vertical-alignment: center;
+                                                enabled: !root.busy;
+                                                clicked => { root.clear-must-include(); }
+                                            }
+                                        }
                                     }
                                 }
                                 model-setup-toggle := LinkButton {
