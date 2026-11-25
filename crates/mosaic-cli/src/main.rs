@@ -3,8 +3,9 @@
 
 use anyhow::{bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
-use mosaic_core::catalog::library_ids;
+use mosaic_core::catalog::{hash_file, hex, library_ids};
 use mosaic_core::export::{export_raster, plan_raster, RasterFormat};
+use mosaic_core::filters::{Colour, People, PhotoFilters};
 use mosaic_core::indexer::{update_library, IndexOptions};
 use mosaic_core::job::{is_cancelled, Job};
 use mosaic_core::layout::{paper_by_name, PrintSettings, PAPERS};
@@ -148,6 +149,30 @@ pub struct MatchArgs {
     /// Hidden message letters: auto | light | dark.
     #[arg(long, requires = "message")]
     pub message_tone: Option<String>,
+    /// Filter by faces: any | portraits | no-people.
+    #[arg(long, default_value = "any")]
+    pub people: String,
+    /// Filter by photo colour: any | colour | bw.
+    #[arg(long, alias = "color", default_value = "any")]
+    pub colour: String,
+    /// Skip likely documents and screenshots.
+    #[arg(long)]
+    pub skip_documents: bool,
+    /// Only use photos taken on or after this date (YYYY, YYYY-MM, or YYYY-MM-DD).
+    #[arg(long)]
+    pub date_from: Option<String>,
+    /// Only use photos taken on or before this date (YYYY, YYYY-MM, or YYYY-MM-DD).
+    #[arg(long)]
+    pub date_to: Option<String>,
+    /// Only use photos whose EXIF camera name contains this text.
+    #[arg(long)]
+    pub camera: Option<String>,
+    /// Only use photos whose EXIF lens name contains this text.
+    #[arg(long)]
+    pub lens: Option<String>,
+    /// Guarantee that these photo files (repeatable) appear at least once in the mosaic.
+    #[arg(long)]
+    pub must_include: Vec<PathBuf>,
 }
 
 #[derive(Args)]
@@ -354,6 +379,22 @@ pub fn settings_from(m: &MatchArgs) -> Result<(GridSpec, MatchSettings)> {
         }
         s.hidden_message = Some(hm);
     }
+    s.photo_filters = PhotoFilters {
+        people: People::parse(&m.people)?,
+        colour: Colour::parse(&m.colour)?,
+        skip_documents: m.skip_documents,
+        date_from: m.date_from.as_deref().map(str::trim).filter(|v| !v.is_empty()).map(str::to_string),
+        date_to: m.date_to.as_deref().map(str::trim).filter(|v| !v.is_empty()).map(str::to_string),
+        camera: m.camera.as_deref().map(str::trim).filter(|v| !v.is_empty()).map(str::to_string),
+        lens: m.lens.as_deref().map(str::trim).filter(|v| !v.is_empty()).map(str::to_string),
+    };
+    for p in &m.must_include {
+        let h = hash_file(p).with_context(|| format!("--must-include {}", p.display()))?;
+        let hx = hex(&h);
+        if !s.must_include.contains(&hx) {
+            s.must_include.push(hx);
+        }
+    }
     s.validate()?;
     Ok((grid, s))
 }
@@ -377,6 +418,11 @@ fn run(cli: Cli, cancel: Arc<AtomicBool>) -> Result<()> {
             let libs = library_ids(&cat, &a.m.libs)?;
             let t = Instant::now();
             let pool = Pool::load(&cat, &libs, settings.merge_near_duplicates)?;
+            let pool = if settings.photo_filters.is_default() {
+                pool
+            } else {
+                settings.photo_filters.apply(&pool, &cat, &libs, settings.merge_near_duplicates, &job)?
+            };
             let load_ms = t.elapsed().as_millis();
             let (target, motif) = load_target(&a.motif, &grid)?;
             let outline = match &a.shape {
@@ -673,6 +719,11 @@ fn recommend_cmd(dd: &Path, a: RecommendArgs, job: &Job) -> Result<()> {
     let (grid, settings) = settings_from(&a.m)?;
     let libs = library_ids(&cat, &a.m.libs)?;
     let pool = Pool::load(&cat, &libs, settings.merge_near_duplicates)?;
+    let pool = if settings.photo_filters.is_default() {
+        pool
+    } else {
+        settings.photo_filters.apply(&pool, &cat, &libs, settings.merge_near_duplicates, job)?
+    };
     let mut cands = Vec::new();
     if let Some(f) = &a.folder {
         cands.extend(MotifCandidate::from_folder(f)?);

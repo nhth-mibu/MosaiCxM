@@ -434,7 +434,7 @@ fn detail_loss(img: &RgbImage, grid: &GridSpec) -> f32 {
 fn trial(cat: &Catalog, c: &MotifCandidate, ld: &Loaded, pool: &Pool, grid: &GridSpec, s: &MatchSettings, opts: &RecommendOptions, rank: usize, job: &Job) -> Result<(TrialScores, Option<PathBuf>, Vec<String>)> {
     let mut notes = Vec::new();
     let tiles = grid.tiles();
-    let (tg, ts) = if tiles > opts.trial_max_tiles {
+    let (tg, mut ts) = if tiles > opts.trial_max_tiles {
         let f = (opts.trial_max_tiles as f64 / tiles as f64).sqrt();
         let g = GridSpec { cols: ((grid.cols as f64 * f).round() as u32).max(1), rows: ((grid.rows as f64 * f).round() as u32).max(1), ..*grid };
         let mut s2 = s.clone();
@@ -443,6 +443,7 @@ fn trial(cat: &Catalog, c: &MotifCandidate, ld: &Loaded, pool: &Pool, grid: &Gri
     } else {
         (*grid, s.clone())
     };
+    ts.must_include.clear();
     // Motif at trial resolution: a reduced decode of the original when available.
     let img = match &c.source {
         MotifSource::File(p) => decode::decode_file(p, Some((tg.cols.max(tg.rows) as usize * CELLS) as u32))?.image,

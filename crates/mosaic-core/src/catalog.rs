@@ -25,6 +25,16 @@ pub fn unhex(s: &str) -> Result<Hash> {
     Ok(h)
 }
 
+/// Content hash (BLAKE3) of a file on disk, enforcing the maximum file size limit.
+pub fn hash_file(path: &Path) -> Result<Hash> {
+    let meta = std::fs::metadata(path).with_context(|| format!("cannot read {}", path.display()))?;
+    if meta.len() > crate::decode::MAX_FILE_BYTES {
+        bail!("file too large ({} bytes): {}", meta.len(), path.display());
+    }
+    let bytes = std::fs::read(path).with_context(|| format!("cannot read {}", path.display()))?;
+    Ok(*blake3::hash(&bytes).as_bytes())
+}
+
 pub const STATUS_OK: i64 = 0;
 pub const STATUS_SKIPPED: i64 = 1;
 

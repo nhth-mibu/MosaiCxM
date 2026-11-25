@@ -98,6 +98,9 @@ pub struct MatchSettings {
     /// Text written into the mosaic with tile brightness (see [`crate::message`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hidden_message: Option<crate::message::HiddenMessage>,
+    /// Content hashes (64-char hex) of hero photos guaranteed to appear at least once.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub must_include: Vec<String>,
 }
 
 impl MatchSettings {
@@ -118,6 +121,7 @@ impl MatchSettings {
             color_correction: 0.0,
             motif_blend: 0.0,
             hidden_message: None,
+            must_include: Vec::new(),
         };
         if method == Method::Variety {
             s.repeat_penalty = 8.0;
@@ -143,6 +147,10 @@ impl MatchSettings {
         }
         if self.repeat_radius > 20 {
             bail!("repeat radius must be at most 20 tiles");
+        }
+        self.photo_filters.validate()?;
+        for h in &self.must_include {
+            crate::catalog::unhex(h).map_err(|_| anyhow::anyhow!("invalid must-include photo hash '{h}'"))?;
         }
         if let Some(m) = &self.hidden_message {
             m.validate()?;
@@ -652,14 +660,82 @@ fn assign(
             uses[cands[old[t] as usize].group as usize] += 1;
         }
     }
-    let mut order: Vec<u32> = (0..n as u32).filter(|&t| active[t as usize]).collect();
-    SplitMix64::new(s.seed).shuffle(&mut order);
     let radius = s.repeat_radius as i64;
     let use_neighbors = s.repeat_penalty > 0.0 && radius > 0;
+    let mut exhausted_groups = 0usize;
+    if !s.must_include.is_empty() && previous.is_none_or(|(_, only)| only.is_none()) {
+        let mut seen = std::collections::HashSet::new();
+        let mut must_photos = Vec::new();
+        for hex_hash in &s.must_include {
+            let h = crate::catalog::unhex(hex_hash)?;
+            if !seen.insert(h) {
+                continue;
+            }
+            let Some(pi) = pool.index_of(&h) else {
+                bail!("a must-include photo is not available in the selected photo pool; check your photo filters or folders");
+            };
+            must_photos.push(pi as u32);
+        }
+        let active_count = active.iter().filter(|&&a| a).count();
+        if must_photos.len() > active_count {
+            bail!("there are more must-include photos ({}) than active tiles ({active_count})", must_photos.len());
+        }
+        for photo_idx in must_photos {
+            job.check()?;
+            let g = pool.photos[photo_idx as usize].group as usize;
+            if uses[g] >= cap {
+                continue;
+            }
+            let photo_cands: Vec<u32> = cands.iter().enumerate().filter(|(_, c)| c.photo == photo_idx).map(|(ci, _)| ci as u32).collect();
+            if photo_cands.is_empty() {
+                continue;
+            }
+            let mut best: Option<(usize, u32, f32)> = None;
+            let mut fallback: Option<(usize, u32, f32)> = None;
+            for t in 0..n {
+                if !active[t] || placed[t] != u32::MAX {
+                    continue;
+                }
+                let same_as_old = old[t] != u32::MAX && cands[old[t] as usize].group as usize == g;
+                let mut neigh_pen = 0.0f32;
+                if use_neighbors {
+                    let (tx, ty) = ((t as i64) % cols, (t as i64) / cols);
+                    for dy in -radius..=radius {
+                        for dx in -radius..=radius {
+                            let (x, y) = (tx + dx, ty + dy);
+                            if (dx == 0 && dy == 0) || x < 0 || y < 0 || x >= cols || y >= rows {
+                                continue;
+                            }
+                            let p = placed[(y * cols + x) as usize];
+                            if p != u32::MAX && cands[p as usize].group as usize == g {
+                                let d = dx.abs().max(dy.abs()) as f32;
+                                neigh_pen += s.repeat_penalty * (radius as f32 + 1.0 - d) / radius as f32;
+                            }
+                        }
+                    }
+                }
+                for &ci in &photo_cands {
+                    let cost = score(s.method, &target.tiles[t], &cands[ci as usize]) + neigh_pen;
+                    let slot = if same_as_old { &mut fallback } else { &mut best };
+                    if slot.map(|b| cost < b.2).unwrap_or(true) {
+                        *slot = Some((t, ci, cost));
+                    }
+                }
+            }
+            if let Some((t, ci, _)) = best.or(fallback) {
+                placed[t] = ci;
+                uses[g] += 1;
+                if uses[g] == cap {
+                    exhausted_groups += 1;
+                }
+            }
+        }
+    }
+    let mut order: Vec<u32> = (0..n as u32).filter(|&t| active[t as usize] && placed[t as usize] == u32::MAX).collect();
+    SplitMix64::new(s.seed).shuffle(&mut order);
     let usage_pen = if s.method == Method::Variety { s.usage_penalty } else { 0.0 };
     let mut neigh: Vec<(u32, f32)> = Vec::new();
     let mut avail: Option<AvailIndex> = None;
-    let mut exhausted_groups = 0usize;
     let _ = r;
     for (step, &t) in order.iter().enumerate() {
         if step % 8192 == 0 {

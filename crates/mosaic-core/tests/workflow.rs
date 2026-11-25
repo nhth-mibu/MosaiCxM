@@ -190,7 +190,7 @@ fn source_filters_combine_and_survive_selection_and_project_reload() {
         expected.push(mosaic_core::catalog::hex(&hash));
     }
     let pool = Pool::load(&e.cat, &[lib], true).unwrap();
-    let f = PhotoFilters { people: People::Portraits, colour: Colour::BlackAndWhite, skip_documents: true };
+    let f = PhotoFilters { people: People::Portraits, colour: Colour::BlackAndWhite, skip_documents: true, ..Default::default() };
     let filtered = f.apply(&pool, &e.cat, &[lib], true, &Job::default()).unwrap();
     assert_eq!(filtered.photos.len(), 2);
     assert_eq!(filtered.group_count, 2, "filtering must renumber duplicate groups");
@@ -217,6 +217,49 @@ fn source_filters_combine_and_survive_selection_and_project_reload() {
     let path = e.root.join("old-project.json");
     std::fs::write(&path, serde_json::to_vec(&old).unwrap()).unwrap();
     assert_eq!(Project::load(&path).unwrap().settings.photo_filters, PhotoFilters::default());
+}
+
+#[test]
+fn exif_date_camera_lens_filters_and_must_include_hero_photos() {
+    use mosaic_core::filters::PhotoFilters;
+    let (e, lib) = indexed_env(12);
+    let pool = Pool::load(&e.cat, &[lib], true).unwrap();
+    // Stamp synthetic EXIF fields onto indexed rows to test SQL EXIF filtering.
+    for (i, p) in pool.photos.iter().enumerate() {
+        let (taken, cam, lens) = match i {
+            0..=3 => ("2022:06:15 10:00:00", "Fujifilm X-T4", "XF 35mm F1.4"),
+            4..=7 => ("2024:08:20 14:30:00", "Nikon Z 8", "NIKKOR Z 24-70mm f/2.8"),
+            _ => ("2025:11:01 09:00:00", "Apple iPhone 16 Pro", "Main 24mm"),
+        };
+        e.cat.conn.execute(
+            "UPDATE file SET taken = ?1, camera = ?2, lens = ?3 WHERE content_hash = ?4",
+            rusqlite::params![taken, cam, lens, &p.hash[..]],
+        ).unwrap();
+    }
+    let date_f = PhotoFilters { date_from: Some("2024".into()), date_to: Some("2024-12-31".into()), ..Default::default() };
+    assert_eq!(date_f.apply(&pool, &e.cat, &[lib], true, &Job::default()).unwrap().photos.len(), 4);
+
+    let cam_f = PhotoFilters { camera: Some("fuji".into()), lens: Some("35mm".into()), ..Default::default() };
+    assert_eq!(cam_f.apply(&pool, &e.cat, &[lib], true, &Job::default()).unwrap().photos.len(), 4);
+
+    // Must-include guarantees a specific outlier photo appears even when Classic matching wouldn't pick it.
+    let dir = e.root.join("a");
+    RgbImage::from_pixel(120, 90, image::Rgb([0, 255, 0])).save(dir.join("hero_green.jpg")).unwrap();
+    update_library(&e.cat, lib, &opts(), &Job::default()).unwrap();
+    let hero_hash = mosaic_core::catalog::hash_file(&dir.join("hero_green.jpg")).unwrap();
+    let hero_hex = mosaic_core::catalog::hex(&hero_hash);
+    let pool = Pool::load(&e.cat, &[lib], true).unwrap();
+    let mut s = MatchSettings::for_method(Method::Classic);
+    s.must_include = vec![hero_hex.clone()];
+    let grid = GridSpec::new(200.0, 150.0, 4, 3).unwrap();
+    let mpath = e.root.join("red_motif.png");
+    RgbImage::from_pixel(160, 120, image::Rgb([220, 20, 20])).save(&mpath).unwrap();
+    let (target, mref) = load_target(&mpath, &grid).unwrap();
+    let proj = Project::create(&pool, libraries_refs(&e.cat, &[lib]).unwrap(), &target, mref, grid, s, &Job::default()).unwrap();
+    assert!(proj.sources.iter().any(|src| src.hash == hero_hex), "must-include hero photo must appear in the mosaic");
+    let pfile = e.root.join("hero-project.json");
+    proj.save(&pfile).unwrap();
+    assert_eq!(Project::load(&pfile).unwrap().settings.must_include, vec![hero_hex]);
 }
 
 #[test]
