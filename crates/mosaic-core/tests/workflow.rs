@@ -453,6 +453,32 @@ fn brick_quadtree_and_grout_render_seamlessly() {
 }
 
 #[test]
+fn story_card_and_palette_coach_detect_missing_color_family() {
+    let e = env();
+    let dir = e.root.join("warm");
+    std::fs::create_dir_all(&dir).unwrap();
+    // Pool has only warm red/orange photos; motif is bright blue -> Palette Coach should flag cyans & blues.
+    for i in 0..6u8 {
+        RgbImage::from_pixel(100, 80, image::Rgb([220, 60 + i * 10, 20])).save(dir.join(format!("warm_{i}.jpg"))).unwrap();
+    }
+    let lib = e.cat.create_library("warm").unwrap();
+    e.cat.add_root(lib, &dir).unwrap();
+    update_library(&e.cat, lib, &opts(), &Job::default()).unwrap();
+    let pool = Pool::load(&e.cat, &[lib], true).unwrap();
+    let grid = GridSpec::new(200.0, 150.0, 4, 3).unwrap();
+    let mpath = e.root.join("blue_motif.png");
+    RgbImage::from_pixel(160, 120, image::Rgb([30, 100, 235])).save(&mpath).unwrap();
+    let (target, mref) = load_target(&mpath, &grid).unwrap();
+    let proj = Project::create(&pool, libraries_refs(&e.cat, &[lib]).unwrap(), &target, mref, grid, MatchSettings::for_method(Method::Classic), &Job::default()).unwrap();
+    let st = mosaic_core::project::output_stats(&e.cat, &proj, &mpath, "preview", serde_json::json!({})).unwrap();
+    let card = mosaic_core::story::build_story_card(&e.cat, &proj, &st).unwrap();
+    assert!(card.story.contains("12 tiles"));
+    assert!(card.palette_coach.iter().any(|t| t.contains("cyans & blues")), "expected blue gap coaching, got {:?}", card.palette_coach);
+    let prompt = mosaic_core::story::ai_story_prompt(&card, &st);
+    assert!(prompt.contains("STORY CARD") && !prompt.contains("warm_0.jpg"), "AI prompt must be stats-only without filenames");
+}
+
+#[test]
 fn document_decisions_ignore_old_cache_and_separate_models_and_failures() {
     use mosaic_core::filters::{DocumentClassifier, PhotoFilters};
     use std::cell::Cell;

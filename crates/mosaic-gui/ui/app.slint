@@ -1067,6 +1067,9 @@ export component AppWindow inherits Window {
     in-out property <[Chart]> stat-charts-left;
     in-out property <[Chart]> stat-charts-right;
     in-out property <string> stats-note;
+    in-out property <string> story-headline;
+    in-out property <string> story-text;
+    in-out property <string> palette-coach-text;
 
     // ----- Help (header "Help" button). Screenshots are in ui/help/.
     in-out property <int> help-topic: 0;
@@ -1316,6 +1319,8 @@ export component AppWindow inherits Window {
     callback export();
     callback show-stats();
     callback save-stats-json();
+    callback polish-story-ai();
+    callback save-story-card();
     callback cancel();
 
     // Refresh after editing stops; keep the first preview an explicit action.
@@ -2433,6 +2438,40 @@ export component AppWindow inherits Window {
                                     label: f.label;
                                     value: f.value;
                                     tint: Theme.chart-colors[i];
+                                }
+                            }
+                            if root.story-headline != "": Rectangle {
+                                background: Theme.surface;
+                                border-color: Theme.line;
+                                border-width: 1px;
+                                border-radius: 10px;
+                                min-height: story-box.preferred-height;
+                                story-box := VerticalLayout {
+                                    padding: 14px;
+                                    spacing: 8px;
+                                    HorizontalLayout {
+                                        spacing: 8px;
+                                        Text { text: "Story Card & Palette Coach"; font-size: 14px; font-weight: 700; color: Theme.fg; horizontal-stretch: 1; vertical-alignment: center; }
+                                        Button {
+                                            text: "Polish with AI";
+                                            enabled: !root.busy;
+                                            clicked => { root.polish-story-ai(); }
+                                        }
+                                        LinkButton {
+                                            text: "Save .txt…";
+                                            tint: Theme.blue;
+                                            font-weight: 600;
+                                            vertical-alignment: center;
+                                            clicked => { root.save-story-card(); }
+                                        }
+                                    }
+                                    Text { text: root.story-headline; font-size: 13px; font-weight: 600; color: Theme.blue; wrap: word-wrap; min-height: self.preferred-height; }
+                                    Text { text: root.story-text; font-size: 12px; color: Theme.fg; wrap: word-wrap; min-height: self.preferred-height; }
+                                    if root.palette-coach-text != "": VerticalLayout {
+                                        spacing: 4px;
+                                        Text { text: "Palette Coach"; font-size: 12px; font-weight: 700; color: Theme.muted; }
+                                        Text { text: root.palette-coach-text; font-size: 12px; color: Theme.muted; wrap: word-wrap; min-height: self.preferred-height; }
+                                    }
                                 }
                             }
                             HorizontalLayout {

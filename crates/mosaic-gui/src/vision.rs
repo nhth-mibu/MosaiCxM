@@ -240,6 +240,12 @@ impl Config {
         let raw = self.chat_text(system, &user, 1024, job)?;
         mosaic_core::shape::sanitize_generated_svg(&raw)
     }
+
+    /// Polish a stats-only Mosaic Story Card & Palette Coach summary using the configured LLM.
+    pub fn polish_story(&self, prompt: &str, job: &Job) -> Result<String> {
+        let system = "You are a thoughtful photo curator and printmaker. Write concisely, warmly, and accurately using only the provided mosaic statistics. Do not invent dates, places, names, or camera gear not present in the stats.";
+        self.chat_text(system, prompt, 512, job)
+    }
 }
 
 pub fn load_preferences(cat: &Catalog) -> Result<Option<(i32, String, String)>> {

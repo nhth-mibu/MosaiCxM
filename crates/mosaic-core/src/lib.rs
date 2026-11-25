@@ -20,6 +20,7 @@ pub mod rng;
 pub mod saliency;
 pub mod shape;
 pub mod sharpness;
+pub mod story;
 pub mod units;
 
 pub use catalog::Catalog;

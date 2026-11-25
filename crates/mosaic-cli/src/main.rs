@@ -63,6 +63,8 @@ enum Cmd {
     Index { project: PathBuf, #[arg(short, long)] out: PathBuf },
     /// Suggest motifs that suit the selected libraries and settings.
     Recommend(RecommendArgs),
+    /// Print a Mosaic Story Card and Palette Coach report for a saved project.
+    Story { project: PathBuf },
     /// Benchmarks with synthetic data.
     #[command(subcommand)]
     Bench(bench::BenchCmd),
@@ -621,6 +623,18 @@ fn run(cli: Cli, cancel: Arc<AtomicBool>) -> Result<()> {
             println!("Wrote {} ({n} photos).", out.display());
         }
         Cmd::Recommend(a) => recommend_cmd(&dd, a, &job)?,
+        Cmd::Story { project } => {
+            let cat = Catalog::open(&dd)?;
+            let p = Project::load(&project)?;
+            let st = mosaic_core::project::output_stats(&cat, &p, &project, "story", serde_json::json!({}))?;
+            let card = mosaic_core::story::build_story_card(&cat, &p, &st)?;
+            println!("{}\n", card.headline);
+            println!("{}\n", card.story);
+            println!("Palette Coach:");
+            for tip in &card.palette_coach {
+                println!("  • {tip}");
+            }
+        }
         Cmd::Bench(b) => bench::run(&dd, b, &job)?,
     }
     Ok(())

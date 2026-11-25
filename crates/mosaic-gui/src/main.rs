@@ -70,6 +70,8 @@ struct State {
     suggestion_paths: Vec<Option<PathBuf>>,
     /// Statistics of the current project, once counted.
     stats: Option<Arc<OutputStats>>,
+    /// Cached offline Story Card & Palette Coach for the current project.
+    story_card: Option<Arc<mosaic_core::story::StoryCard>>,
     /// Folder being checked before it is added: (check number, path).
     check: Option<(u64, PathBuf)>,
     check_counter: u64,
@@ -755,6 +757,10 @@ fn show_project(ui: &AppWindow, s: &mut State, p: Project, buf: SharedPixelBuffe
     ui.set_stats_summary(format!("{} photos", thousands(st.distinct_used as u64)).into());
     ui.set_has_stats(false);
     s.stats = None;
+    s.story_card = None;
+    ui.set_story_headline("".into());
+    ui.set_story_text("".into());
+    ui.set_palette_coach_text("".into());
     let p = Arc::new(p);
     reset_zoom(ui, s, &p);
     s.project = Some(p);
@@ -2142,12 +2148,17 @@ fn main() -> Result<()> {
         let (w, s) = (ui.as_weak(), st.clone());
         ui.on_show_stats(move || {
             let ui = w.unwrap();
-            let (p, cached) = {
+            let (p, cached, cached_card) = {
                 let s = s.lock().unwrap();
-                (s.project.clone(), s.stats.clone())
+                (s.project.clone(), s.stats.clone(), s.story_card.clone())
             };
             let Some(p) = p else { return };
-            if let Some(st) = cached {
+            if let (Some(st), Some(card)) = (cached, cached_card) {
+                ui.set_story_headline(card.headline.as_str().into());
+                if ui.get_story_text().is_empty() {
+                    ui.set_story_text(card.story.as_str().into());
+                }
+                ui.set_palette_coach_text(card.palette_coach.iter().map(|t| format!("• {t}")).collect::<Vec<_>>().join("\n").into());
                 return show_stats(&ui, &p, &st);
             }
             if ui.get_busy() {
@@ -2156,14 +2167,72 @@ fn main() -> Result<()> {
             run_job(&ui, &s, "Counting statistics", move |_job, dd| {
                 let cat = Catalog::open(&dd)?;
                 let st = output_stats(&cat, &p, &dd.join(LAST_PROJECT), "preview", serde_json::json!({}))?;
+                let card = mosaic_core::story::build_story_card(&cat, &p, &st)?;
                 Ok(Box::new(move |ui: &AppWindow, s: &mut State| {
                     if s.project.as_ref().is_some_and(|cur| Arc::ptr_eq(cur, &p)) {
                         let st = Arc::new(st);
+                        let card = Arc::new(card);
                         s.stats = Some(st.clone());
+                        s.story_card = Some(card.clone());
+                        ui.set_story_headline(card.headline.as_str().into());
+                        ui.set_story_text(card.story.as_str().into());
+                        ui.set_palette_coach_text(card.palette_coach.iter().map(|t| format!("• {t}")).collect::<Vec<_>>().join("\n").into());
                         show_stats(ui, &p, &st);
                     }
                 }))
             });
+        });
+    }
+    {
+        let (w, s) = (ui.as_weak(), st.clone());
+        ui.on_polish_story_ai(move || {
+            let ui = w.unwrap();
+            if ui.get_busy() { return; }
+            let (st_arc, card_arc) = {
+                let guard = s.lock().unwrap();
+                (guard.stats.clone(), guard.story_card.clone())
+            };
+            let (Some(stats), Some(card)) = (st_arc, card_arc) else {
+                return report_error(&ui, anyhow!("open Statistics first"));
+            };
+            let config = match read_classifier(&ui) {
+                Ok(c) => c,
+                Err(e) => return report_error(&ui, anyhow!("configure an AI model in Step 1 first: {e:#}")),
+            };
+            let prompt = mosaic_core::story::ai_story_prompt(&card, &stats);
+            run_job(&ui, &s, "Polishing Story Card with AI", move |job, _| {
+                let polished = config.polish_story(&prompt, job)?;
+                Ok(Box::new(move |ui: &AppWindow, _: &mut State| {
+                    ui.set_story_text(polished.into());
+                    ui.set_status("Story Card & Palette Coach polished with AI.".into());
+                }))
+            });
+        });
+    }
+    {
+        let w = ui.as_weak();
+        ui.on_save_story_card(move || {
+            let ui = w.unwrap();
+            let headline = ui.get_story_headline().to_string();
+            let story = ui.get_story_text().to_string();
+            let coach = ui.get_palette_coach_text().to_string();
+            if headline.is_empty() && story.is_empty() {
+                return report_error(&ui, anyhow!("open Statistics first"));
+            }
+            let Some(out) = rfd::FileDialog::new()
+                .set_title("Save Story Card")
+                .add_filter("Text file", &["txt"])
+                .set_file_name("mosaic-story.txt")
+                .save_file()
+            else { return };
+            let mut body = format!("{headline}\n\n{story}\n");
+            if !coach.is_empty() {
+                body += &format!("\nPalette Coach:\n{coach}\n");
+            }
+            match std::fs::write(&out, body) {
+                Ok(()) => ui.set_status(format!("Story card saved to {}", out.display()).into()),
+                Err(e) => report_error(&ui, anyhow!("cannot write {}: {e}", out.display())),
+            }
         });
     }
     {
