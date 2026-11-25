@@ -11,7 +11,7 @@ Everything about building, the command-line tool, the engine and its limits. For
 
 ## Quick start
 
-Requirements: Rust 1.85+ (2024 edition). On Linux the desktop app also needs the usual X11/Wayland libraries (`libxkbcommon-x11`, `libfontconfig`). The CLI has no system dependencies.
+Requirements: Rust 1.85+ (2024 edition). On Linux the desktop app also needs the usual X11/Wayland libraries (`libxkbcommon-x11`, `libfontconfig`) and optionally `libheif1` for HEIC/HEIF decoding. The CLI has no mandatory system dependencies.
 
 ```bash
 cargo build --release              # builds the `mosaic` CLI and `mosaic-gui`
@@ -24,16 +24,16 @@ The catalogue (index, descriptors, thumbnails) lives in the platform data folder
 
 The data folder stays the same across app versions. On macOS, it is `~/Library/Application Support/mosaic`. Keep the same data folder when you update the app. Relative `MOSAIC_DATA_DIR` paths depend on the launch folder; use an absolute path for a custom location.
 
-`catalog.sqlite` also stores face detections, offline filter results and AI judgements. Judgements use the photo content hash and classifier identity, independently of the app version. The `meta` table stores the selected classifier and the provider, endpoint and model settings. API keys are never saved. Startup restores the settings and reuses saved AI judgements without enabling a connection. Photos without a saved judgement use offline checks until the user enables model checks. If an older catalogue contains one AI classifier, startup selects its saved judgements automatically. If it contains several, enable the intended model once to select it.
+`catalog.sqlite` also stores face detections (`faces`), visual saliency subject boxes (`saliency`), offline filter results, AI document judgements (`document_decision`), and permanent AI semantic tags (`photo_tags`). AI judgements and tags are keyed by photo content hash and model identity, independently of the app version. The `meta` table stores the selected classifier and the provider, endpoint and model settings. API keys are never saved. Startup restores the settings and reuses saved AI judgements and tags without enabling a connection. Photos without a saved judgement use offline checks until the user enables model checks. If an older catalogue contains one AI classifier, startup selects its saved judgements automatically. If it contains several, enable the intended model once to select it.
 
 
 ## Releases
 
-Pushing a tag like `v0.1.0` runs `.github/workflows/release.yml` and publishes a GitHub Release with:
+Pushing a tag like `v0.1.0` (or dispatching `.github/workflows/release.yml` with a version input) builds and publishes a GitHub Release with:
 
-- `mosaic-<tag>-windows-x64.zip` (`mosaic-gui.exe` only)
-- `mosaic-<tag>-macos-arm64.dmg` (`MosaiCxM.app` only)
-- `mosaic-<tag>-linux-x64.tar.gz` (`mosaic-gui`, `install.sh`, desktop file and icon)
+- `mosaic-<tag>-windows-x64.zip` (`mosaic-gui.exe` + `heif.dll` / `libde265.dll` from `vcpkg` for built-in HEIC decoding)
+- `mosaic-<tag>-macos-arm64.dmg` (`MosaiCxM.app`, using Apple's built-in `ImageIO` for hardware HEIC decoding)
+- `mosaic-<tag>-linux-x64.tar.gz` (`mosaic-gui`, `install.sh`, desktop file and icon; loads system `libheif.so.1` dynamically when installed)
 
 The app icon is drawn by `scripts/make_icons.py` (Pillow). Re-run it after changing the design; it rewrites `crates/mosaic-gui/ui/icon.png` and `crates/mosaic-gui/icons/`.
 
@@ -41,7 +41,7 @@ The app icon is drawn by `scripts/make_icons.py` (Pillow). Re-run it after chang
 git tag v0.1.0 && git push origin v0.1.0
 ```
 
-You can also run the workflow by hand from the Actions tab; it then only uploads the files as workflow artifacts. The macOS app is ad-hoc signed but not notarized, so on first launch right-click it and choose **Open**.
+You can also run the workflow by hand from the Actions tab; without a version input it only uploads the files as workflow artifacts. The macOS app is ad-hoc signed but not notarized, so on first launch right-click it and choose **Open**.
 
 ## CLI workflow
 
@@ -68,15 +68,24 @@ mosaic create --motif portrait.jpg --libs travel,family --width-mm 1000 --height
   --tile-mm 15 --method variety --max-reuse 3 --repeat-penalty 8 --seed 42 \
   -o portrait.json --preview preview.png
 
-# Non-rectangular outline: built-in shape, a shape file, or the motif's own transparency.
+# Filters, motif cropping, hero photos, grid layouts & grout
+mosaic create --motif portrait.heic --libs travel --width-mm 1000 --height-mm 700 --tile-mm 15 \
+  --date-from 2023-06 --date-to 2024-12-31 --camera Fuji --lens 35mm \
+  --theme "beach sunset, ocean" --must-include hero.jpg --exclude bad.jpg \
+  --motif-zoom 1.5 --motif-pan-x 0.5 --motif-pan-y 0.35 --focal-priority --content-aware \
+  --grid-style quadtree --grout-mm 1.0 --grout-color '#ffffff' -o custom.json
+
+# Non-rectangular outline: built-in shape, a shape file, "motif" alpha, or "cutout" subject mask.
 #   SVG: drawn parts are inside. PNG/WebP with transparency: opaque parts.
 #   Other images: dark parts. The shape is centred and fitted inside the artwork
-#   (--shape motif covers the artwork like the motif, so it lines up with it).
+#   (--shape motif and --shape cutout cover the artwork like the motif, so they line up with it).
 mosaic create --motif portrait.jpg --libs travel --width-mm 1000 --height-mm 1000 --tile-mm 15 \
   --shape heart --background '#ffffff' --shape-threshold 0.5 -o heart.json
+mosaic create ... --shape cutout [--shape-invert] -o cutout.json
 mosaic create ... --shape logo.svg [--shape-invert] -o logo.json
 
 mosaic preview portrait.json -o preview.png --tile-px 32
+mosaic story portrait.json              # offline Story Card & Palette Coach diagnostics
 mosaic check portrait.json              # missing/changed source files, before export
 mosaic export portrait.json -o portrait.tif --dpi 300 --dry-run   # estimates only
 mosaic export portrait.json -o portrait.tif --dpi 300             # tiled BigTIFF
@@ -129,7 +138,7 @@ The notes explain the result in plain words, for example "strong colour coverage
 
 ## Libraries and indexing
 
-- Formats: JPEG, PNG, WebP and TIFF (incl. BigTIFF), detected from file content. Files are only picked up by extension, case-insensitive (`jpg jpeg jpe jfif png webp tif tiff`). 16-bit PNG/TIFF is reduced to 8 bits per channel; alpha is composited over white. Other files are counted as ignored.
+- Formats: JPEG, PNG, WebP, TIFF (incl. BigTIFF), HEIC/HEIF (`.heic`, `.heif`, `.hif` via Apple `ImageIO` on macOS and `libheif` on Linux/Windows), and Camera RAW (`cr2`, `cr3`, `nef`, `nrw`, `arw`, `dng`, `orf`, `raf`, `rw2`, `pef`, `srw`, `rwl` via embedded JPEG preview extraction), detected from file content. 16-bit PNG/TIFF is reduced to 8 bits per channel; alpha is composited over white. Other files are counted as ignored.
 - Folders are scanned at any depth. Symlinked folders are followed; a symlink loop is reported once and not scanned twice. If a folder can't be read, files already indexed under it are kept rather than marked removed.
 - Skipped: hidden files and folders (names starting with `.`, which covers macOS `._` files, `.Trashes` and `.Spotlight-V100`) and system or NAS folders (`@eaDir`, `#recycle`, `#snapshot`, `$RECYCLE.BIN`, `System Volume Information`, `lost+found`). Motif folders use the same rules.
 - **EXIF orientation** is applied before analysis, preview and export, so crops always refer to the upright image.
@@ -137,25 +146,25 @@ The notes explain the result in plain words, for example "strong colour coverage
 - Removed files are dropped from the index. A **missing source folder** (for example an unplugged drive) is reported, and its records are kept.
 - **Relinking** changes a folder's location and checks a sample of files first. Descriptors are keyed by content hash, so nothing is re-analysed.
 - Corrupt, truncated, oversized (>512 MB) or undecodable files are reported with a reason and never fail the import.
-- **Bounded resources.** A fixed worker pool works through batches of 128 files. JPEGs are decoded with DCT scaling (to ~128 px for analysis), decode allocations are capped at 768 MB, and thumbnails are 96 px JPEGs.
+- **Bounded resources.** A fixed worker pool works through batches of 128 files. JPEGs are decoded with DCT scaling (to ~128 px for analysis), HEICs use hardware/embedded thumbnail fast paths when available, decode allocations are capped at 768 MB, and thumbnails are 96 px JPEGs.
 - **Stored per photo:** a 16×16 Lab grid of the whole frame (768 B), a 64-bit dHash, the upright size, and a 96 px thumbnail. Descriptors carry `DESCRIPTOR_VERSION`. When it is bumped, they are recomputed on the next update. EXIF fields carry a separate `META_VERSION`, which triggers a re-read without decoding.
 - **Crop/aspect.** Because the grid covers the uncropped frame, the descriptor for any tile aspect and crop position is derived on the fly. Photos are never decoded again for matching or previews.
 - **Crop position.** Wide photos are cut from the centre. Tall photos are cut near the top (`TALL_CROP_T` = 0.2 along the free height), because heads are near the top of most portraits. With off-centre crops on, wide photos also try the left and right ends, and tall photos also try the very top, but never the bottom.
-- **Faces.** While indexing, the YuNet face detector (embedded ONNX model, about 230 KB, MIT licence, run on the CPU with `tract`) looks at each photo letterboxed to 320 × 320 px, about 12 ms per photo on one core. Up to 8 face boxes per photo are stored in the `faces` table (8 bytes each, `FACES_VERSION`). A photo without a current `faces` row is analysed again on the next update, so existing catalogues are re-scanned once. With *Keep faces in frame* (`face_crop`, on by default), each photo's first crop position keeps all its faces whole and centres them when the default crop does not hold them. If they do not all fit, the window with the most whole-face area wins. Other crop positions are used only if they cut no face. Photos without faces use the rule above.
+- **Faces & visual saliency.** While indexing, the YuNet face detector (embedded ONNX model, about 230 KB, MIT licence, run on the CPU with `tract`) looks at each photo letterboxed to 320 × 320 px, about 12 ms per photo on one core, and a lightweight pure-Rust CIE Lab frequency-tuned + border-contrast + gradient saliency detector computes a primary subject box (`saliency` table, 20 bytes per photo, `SALIENCY_VERSION`). Up to 8 face boxes per photo are stored in the `faces` table (8 bytes each, `FACES_VERSION`). With *Keep faces & subjects in frame* (`face_crop`, on by default), each photo's first crop position keeps all its faces whole and centres them; photos without faces centre their detected visual subject (pets, landmarks, objects) before falling back to the rule above.
 - **Storage split.** Source photos stay in their folders and are never modified. Cached analysis is in `catalog.sqlite` in the data folder. Projects are JSON files saved wherever you choose.
 
 ## Projects
 
-A project stores the motif reference (path, content hash, crop), the selected libraries, the grid and physical size, all matching settings and the seed, the descriptor version, source identities (content hashes), the final tile assignments with crop rectangles and colour adjustments, the target cells and match statistics. Previews and exports always reuse the saved assignment, so changing DPI or paper never re-matches.
+A project stores the motif reference (path, content hash, crop), the selected libraries, the grid and physical size, all matching settings and the seed, the descriptor version, source identities (content hashes), the final tile assignments with crop rectangles, spans (`1` = regular, `2` = 2×2 quadtree hero tile, `0` = covered sibling), and colour adjustments, the target cells and match statistics. Previews and exports always reuse the saved assignment, so changing DPI or paper never re-matches.
 
-**Outline (optional).** `outline` holds the shape (built-in, or a file path with its content hash and the invert/cover flags), the background colour and the edge threshold. The shape is sampled 6×6 times per tile (2×2 above 250k tiles); a tile is placed when its inside share is at least the threshold. Tiles outside are stored as `{"p": 4294967295}` (empty), are skipped by matching, reuse limits and statistics, and render as the background colour (motif blend is not applied there). Edges follow tile borders, so no photo is cut. PDF pages whose window holds no placed tile are left out and drawn grey on the assembly map. Older projects without `outline` load unchanged.
+**Outline (optional).** `outline` holds the shape (built-in, a file path with its content hash and the invert/cover flags, or an offline `cutout` subject mask), the background colour and the edge threshold. The shape is sampled 6×6 times per tile (2×2 above 250k tiles); a tile is placed when its inside share is at least the threshold. Tiles outside are stored as `{"p": 4294967295}` (empty), are skipped by matching, reuse limits and statistics, and render as the background colour (motif blend is not applied there). Edges follow tile borders, so no photo is cut. PDF pages whose window holds no placed tile are left out and drawn grey on the assembly map. Older projects without `outline` load unchanged.
 
 Before an export, every source is resolved to an existing, unchanged file. A changed stat triggers a re-hash. Missing, changed or unindexed sources are listed with the number of affected tiles and the fix (relink, restore, update index). The export does not start, and photos are never silently substituted.
 
 ## Large output and printing
 
 - **Pixel maths.** Sizes are computed with checked integer arithmetic from mm and DPI. 3,000 mm at 300 DPI is 35,433 px per side, 1.26 Gpx, 3.77 GB raw RGB. Tile edges are `floor(i × W_px / cols)`, so they are exact and identical in every strip and page.
-- **Rendering** works in bounded bands. Each tile is resampled once at its full global pixel size into a byte-bounded LRU cache, then cut. Neighbouring strips and pages therefore share identical pixels, and page boundaries can't create seams (tested). The full raster never exists in memory.
+- **Rendering** works in bounded bands. Each tile is resampled once at its full global pixel size into a byte-bounded LRU cache, then cut. Neighbouring strips and pages therefore share identical pixels, and page boundaries can't create seams (tested, including Brick-offset, Quadtree, and grout borders). The full raster never exists in memory.
 - **BigTIFF** is tiled 256×256 with Deflate and a horizontal predictor, written by a small in-tree streaming writer. The `tiff` crate's encoder writes strips only. PNG is streamed row by row. JPEG is streamed through `jpeg-encoder`'s row-pull API, and is limited to 65,535 px per side by the format.
 - **Tiled PDF.** One JPEG image per print page at the print DPI, streamed straight into the file. Only object offsets are kept in memory. Pages include crop marks, red alignment ticks for the overlap, the page label (row letter + column) with neighbours, artwork coordinates, a 50 mm ruler and an "actual size" reminder. Page 1 is an A4 portrait assembly map with 6 mm margins, instructions, a 50 × 50 mm square and a 100 mm ruler, independent of the mosaic pages' paper size, orientation and margins. The PDF asks viewers for `PrintScaling /None`.
 - **Page layout.** Usable area = paper − margins − 2 × mark space. Settings that leave no usable area are rejected. Pages step by `usable − overlap`, so overlap is duplicated content and never extra artwork. Edge pages are partially filled. After trimming, the assembled size equals the requested size exactly (tested). Page images are snapped to the global pixel grid, so there is no scaling drift.
@@ -167,7 +176,7 @@ Before an export, every source is resolved to an existing, unchanged file. A cha
 ## Colour handling
 
 - Matching happens in CIELAB (D65, CIE76 ΔE). Averages are taken in linear light.
-- Embedded RGB ICC profiles are converted to sRGB with `moxcms`. Untagged images are treated as sRGB. Gray and CMYK profiles are not colour-managed; CMYK JPEGs get a naive conversion.
+- Embedded RGB ICC profiles are converted to sRGB with `moxcms` (or CoreGraphics ColorSync for macOS HEIC). Untagged images are treated as sRGB. Gray and CMYK profiles are not colour-managed; CMYK JPEGs get a naive conversion.
 - Transparency is composited over white (paper).
 - The same decode, orientation, crop and resize path (Catmull-Rom) is used for previews and exports.
 - Output is 8-bit sRGB. There is **no** printer ICC or CMYK conversion, and no professional print-fidelity claim is made.
@@ -176,16 +185,16 @@ Before an export, every source is resolved to an existing, unchanged file. A cha
 
 | Need | Choice | Why / trade-off |
 |---|---|---|
-| Decode | `image` (PNG, WebP, TIFF), `jpeg-decoder` (JPEG with DCT scaling) | DCT scaling makes indexing and export decode only what is needed. `jpeg-decoder` is in maintenance mode but stable. |
+| Decode | `image` (PNG, WebP, TIFF), `jpeg-decoder` (JPEG/RAW preview with DCT scaling), native `heif.rs` (macOS `ImageIO` / Linux & Windows `libheif` C ABI) | DCT scaling and HEIC thumbnail fast paths keep indexing fast; zero extra Rust crates or `Cargo.lock` churn for HEIC/RAW. |
 | Resize | `fast_image_resize` | SIMD convolution; much faster than `image::imageops`. |
-| EXIF | `kamadak-exif` (+ `image` orientation parser) | Pure Rust; reads JPEG/PNG/WebP/TIFF containers. |
+| EXIF | `kamadak-exif` (+ `image` orientation parser) | Pure Rust; reads JPEG/PNG/WebP/TIFF/HEIC containers (with embedded JPEG fallback for RAW). |
 | ICC | `moxcms` | Pure Rust CMS (also used by `image`); avoids a C `lcms2` build. |
 | Database | `rusqlite` (bundled SQLite) | One local file, transactional, no server. |
 | Hash | `blake3` | Fast full-content hashing for change and duplicate detection. |
 | Nearest neighbours | `kiddo` k-d tree | Measured roughly 150–750× faster than exhaustive search at 100k photos with the same best candidate (see benchmarks). |
 | Parallelism | `rayon`, one global pool | Decode, match and render share it, so they don't oversubscribe the CPU. |
 | Encoders | `png`, `jpeg-encoder`, `flate2`; in-tree BigTIFF and PDF writers | Streaming with bounded memory. `pdf-writer` keeps the whole document in memory. |
-| SVG shapes | `resvg` (no text/fonts features) | Pure Rust SVG renderer; only used to rasterise outline masks. |
+| SVG shapes | `resvg` (no text/fonts features) | Pure Rust SVG renderer; used to validate & rasterise outline masks (including AI-generated SVGs). |
 | UI | Slint (Fluent style), `rfd` file dialogs | Polished, Rust-native, no web stack. Slint's royalty-free licence requires attribution in the app or docs. |
 
 ## Benchmarks
