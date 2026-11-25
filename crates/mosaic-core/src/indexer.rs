@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 pub const IMAGE_EXTENSIONS: &[&str] = &[
-    "jpg", "jpeg", "jpe", "jfif", "png", "webp", "tif", "tiff",
+    "jpg", "jpeg", "jpe", "jfif", "png", "webp", "tif", "tiff", "heic", "heif", "hif",
     "cr2", "cr3", "nef", "nrw", "arw", "dng", "orf", "raf", "rw2", "pef", "srw", "rwl",
 ];
 

@@ -385,6 +385,71 @@ fn camera_raw_files_index_match_and_export() {
 }
 
 #[test]
+fn heic_files_index_match_and_export() {
+    use std::process::Command;
+
+    let encode_heic = |src: &Path, dst: &Path| -> bool {
+        if Command::new("heif-enc").args(["-q", "85", src.to_str().unwrap(), "-o", dst.to_str().unwrap()]).status().is_ok_and(|s| s.success()) {
+            return true;
+        }
+        #[cfg(target_os = "macos")]
+        if Command::new("sips").args(["-s", "format", "heic", src.to_str().unwrap(), "--out", dst.to_str().unwrap()]).status().is_ok_and(|s| s.success()) {
+            return true;
+        }
+        false
+    };
+
+    let e = env();
+    let dir = e.root.join("heics");
+    let tmp_pngs = e.root.join("pngs");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::create_dir_all(&tmp_pngs).unwrap();
+
+    let colors = [[210u8, 40, 40], [40, 200, 50], [40, 60, 215], [230, 210, 40]];
+    for (i, rgb) in colors.into_iter().enumerate() {
+        let png = tmp_pngs.join(format!("shot_{i}.png"));
+        let heic = dir.join(format!("shot_{i}.heic"));
+        RgbImage::from_pixel(160, 120, image::Rgb(rgb)).save(&png).unwrap();
+        if !encode_heic(&png, &heic) {
+            if std::env::var_os("CI").is_some() {
+                panic!("CI must have heif-enc or sips installed to run HEIC end-to-end test");
+            }
+            return;
+        }
+        let bytes = std::fs::read(&heic).unwrap();
+        assert_eq!(mosaic_core::decode::sniff(&bytes), Some(mosaic_core::decode::Format::Heif));
+    }
+
+    assert!(mosaic_core::heif::is_available(), "libheif/ImageIO must be available");
+    let first = mosaic_core::decode::decode_file(&dir.join("shot_0.heic"), None).unwrap();
+    assert_eq!((first.info.full_width, first.info.full_height), (160, 120));
+    let px = first.image.get_pixel(80, 60).0;
+    assert!(px[0] > 160 && px[1] < 90 && px[2] < 90, "decoded red HEIC pixel looks wrong: {px:?}");
+
+    let lib = e.cat.create_library("heics").unwrap();
+    e.cat.add_root(lib, &dir).unwrap();
+    let r = update_library(&e.cat, lib, &opts(), &Job::default()).unwrap();
+    assert_eq!(r.decoded, 4);
+    assert!(r.skipped.is_empty(), "skipped HEIC files: {:?}", r.skipped);
+
+    let pool = Pool::load(&e.cat, &[lib], true).unwrap();
+    let grid = GridSpec::new(100.0, 100.0, 2, 2).unwrap();
+    let mpath = e.root.join("motif.heic");
+    std::fs::copy(dir.join("shot_0.heic"), &mpath).unwrap();
+    let (target, mref) = load_target(&mpath, &grid).unwrap();
+    let proj = Project::create(&pool, libraries_refs(&e.cat, &[lib]).unwrap(), &target, mref, grid, MatchSettings::for_method(Method::Classic), &Job::default()).unwrap();
+    let prev = mosaic_core::render::render_preview(&e.cat, &proj, 16, &Job::default()).unwrap();
+    assert_eq!(prev.dimensions(), (32, 32));
+    let chk = check_sources(&e.cat, &proj, &Job::default()).unwrap();
+    assert!(chk.ok());
+    let src = FileSource { paths: chk.resolved.into_iter().map(|p| p.unwrap()).collect() };
+    let out = e.root.join("heic_export.png");
+    let plan = plan_raster(&proj, 72.0, RasterFormat::Png).unwrap();
+    let rep = export_raster(&proj, &src, &plan, &out, &Job::default()).unwrap();
+    assert!(rep.bytes > 0);
+}
+
+#[test]
 fn brick_quadtree_and_grout_render_seamlessly() {
     use mosaic_core::matching::GridStyle;
     use mosaic_core::render::{Renderer, ThumbSource};
