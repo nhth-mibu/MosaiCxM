@@ -199,6 +199,12 @@ pub struct MatchArgs {
     /// Tile border / grout colour, as #rrggbb.
     #[arg(long, default_value = "#ffffff")]
     pub grout_color: String,
+    /// Only use photos matching a semantic theme query against cached AI tags and folder/file names.
+    #[arg(long)]
+    pub theme: Option<String>,
+    /// Prefer portrait photos inside motif face regions and scenic photos elsewhere.
+    #[arg(long)]
+    pub content_aware: bool,
 }
 
 #[derive(Args)]
@@ -413,6 +419,7 @@ pub fn settings_from(m: &MatchArgs) -> Result<(GridSpec, MatchSettings)> {
         date_to: m.date_to.as_deref().map(str::trim).filter(|v| !v.is_empty()).map(str::to_string),
         camera: m.camera.as_deref().map(str::trim).filter(|v| !v.is_empty()).map(str::to_string),
         lens: m.lens.as_deref().map(str::trim).filter(|v| !v.is_empty()).map(str::to_string),
+        theme_query: m.theme.as_deref().map(str::trim).filter(|v| !v.is_empty()).map(str::to_string),
     };
     for p in &m.must_include {
         let h = hash_file(p).with_context(|| format!("--must-include {}", p.display()))?;
@@ -434,6 +441,7 @@ pub fn settings_from(m: &MatchArgs) -> Result<(GridSpec, MatchSettings)> {
     s.grid_style = mosaic_core::matching::GridStyle::parse(&m.grid_style)?;
     s.grout_mm = m.grout_mm;
     s.grout_color = parse_hex_color(&m.grout_color)?;
+    s.content_aware = m.content_aware;
     s.validate()?;
     Ok((grid, s))
 }

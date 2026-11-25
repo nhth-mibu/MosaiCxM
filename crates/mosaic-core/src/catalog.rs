@@ -153,6 +153,7 @@ CREATE TABLE IF NOT EXISTS faces(content_hash BLOB PRIMARY KEY, version INTEGER 
 CREATE TABLE IF NOT EXISTS saliency(content_hash BLOB PRIMARY KEY, version INTEGER NOT NULL, box BLOB NOT NULL);
 CREATE TABLE IF NOT EXISTS photo_classification(content_hash BLOB PRIMARY KEY, version INTEGER NOT NULL, document INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS document_decision(content_hash BLOB NOT NULL, classifier TEXT NOT NULL, document INTEGER NOT NULL, PRIMARY KEY(content_hash, classifier));
+CREATE TABLE IF NOT EXISTS photo_tags(content_hash BLOB NOT NULL, tagger TEXT NOT NULL, tags TEXT NOT NULL, PRIMARY KEY(content_hash, tagger));
 "#;
 
 impl Catalog {
@@ -452,6 +453,94 @@ impl Catalog {
         Ok(v)
     }
 
+    pub fn put_photo_tags(&self, h: &Hash, tagger: &str, tags: &[String]) -> Result<()> {
+        let norm: Vec<String> = tags
+            .iter()
+            .map(|t| t.trim().to_lowercase())
+            .filter(|t| !t.is_empty())
+            .collect();
+        let json = serde_json::to_string(&norm)?;
+        self.conn.execute(
+            "INSERT OR REPLACE INTO photo_tags(content_hash, tagger, tags) VALUES(?1, ?2, ?3)",
+            params![&h[..], tagger, json],
+        )?;
+        Ok(())
+    }
+
+    pub fn photo_tags(&self, h: &Hash, tagger: Option<&str>) -> Result<Option<Vec<String>>> {
+        if let Some(t) = tagger {
+            let raw: Option<String> = self
+                .conn
+                .query_row(
+                    "SELECT tags FROM photo_tags WHERE content_hash = ?1 AND tagger = ?2",
+                    params![&h[..], t],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            return Ok(raw.and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok()));
+        }
+        let mut st = self.conn.prepare("SELECT tags FROM photo_tags WHERE content_hash = ?1")?;
+        let rows = st.query_map([&h[..]], |r| r.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        let mut found = false;
+        for row in rows {
+            found = true;
+            if let Ok(v) = serde_json::from_str::<Vec<String>>(&row?) {
+                for tag in v {
+                    if !out.contains(&tag) {
+                        out.push(tag);
+                    }
+                }
+            }
+        }
+        Ok(found.then_some(out))
+    }
+
+    pub fn all_photo_tags(&self, libs: &[i64]) -> Result<HashMap<Hash, Vec<String>>> {
+        if libs.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let ids = libs.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "SELECT pt.content_hash, pt.tags FROM photo_tags pt
+             WHERE pt.content_hash IN (
+               SELECT f.content_hash FROM file f JOIN root r ON f.root_id = r.id
+               WHERE f.status = 0 AND r.library_id IN ({ids})
+             )"
+        );
+        let mut st = self.conn.prepare(&sql)?;
+        let rows = st.query_map([], |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, String>(1)?)))?;
+        let mut out: HashMap<Hash, Vec<String>> = HashMap::new();
+        for row in rows {
+            let (hb, raw) = row?;
+            let Ok(h) = hb.try_into() else { continue };
+            if let Ok(tags) = serde_json::from_str::<Vec<String>>(&raw) {
+                let entry = out.entry(h).or_default();
+                for t in tags {
+                    if !entry.contains(&t) {
+                        entry.push(t);
+                    }
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    pub fn tagged_count(&self, libs: &[i64]) -> Result<usize> {
+        if libs.is_empty() {
+            return Ok(0);
+        }
+        let ids = libs.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "SELECT COUNT(DISTINCT pt.content_hash) FROM photo_tags pt
+             WHERE pt.content_hash IN (
+               SELECT f.content_hash FROM file f JOIN root r ON f.root_id = r.id
+               WHERE f.status = 0 AND r.library_id IN ({ids})
+             )"
+        );
+        Ok(self.conn.query_row(&sql, [], |r| r.get::<_, i64>(0))? as usize)
+    }
+
     /// Deletes cached descriptors and thumbnails no file refers to.
     pub fn gc(&self) -> Result<usize> {
         let n = self.conn.execute("DELETE FROM descriptor WHERE content_hash NOT IN (SELECT content_hash FROM file WHERE content_hash IS NOT NULL)", [])?;
@@ -460,6 +549,7 @@ impl Catalog {
         self.conn.execute("DELETE FROM saliency WHERE content_hash NOT IN (SELECT content_hash FROM descriptor)", [])?;
         self.conn.execute("DELETE FROM photo_classification WHERE content_hash NOT IN (SELECT content_hash FROM descriptor)", [])?;
         self.conn.execute("DELETE FROM document_decision WHERE content_hash NOT IN (SELECT content_hash FROM descriptor)", [])?;
+        self.conn.execute("DELETE FROM photo_tags WHERE content_hash NOT IN (SELECT content_hash FROM descriptor)", [])?;
         Ok(n)
     }
 }
