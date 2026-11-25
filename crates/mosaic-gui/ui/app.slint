@@ -779,7 +779,7 @@ component ZoomView inherits Rectangle {
         height: 26px;
         border-radius: 7px;
         background: #00000080;
-        help := Text { text: "Click a tile to swap its photo. Right-click for details. Scroll to zoom."; color: #ffffff; font-size: 12px; }
+        help := Text { text: "Click a tile to exclude its photo. Right-click for details. Scroll to zoom."; color: #ffffff; font-size: 12px; }
     }
     // The photo of the clicked tile.
     if root.info.open: Rectangle {
@@ -1093,7 +1093,7 @@ export component AppWindow inherits Window {
                 "Point at a control and wait a moment. A tooltip tells you what the control does. A small ? next to a name shows that it has a tooltip.",
                 "The app saves your work automatically. When you start the app again, it opens your last mosaic.",
                 "To look closer at the preview, scroll or double-click it. Drag it to move. Click the percentage to see the full mosaic again.",
-                "Click a tile in the preview to swap its photo. Right-click a tile to see its photo details.",
+                "Click a tile in the preview to exclude its photo and replace it. Right-click a tile to see its photo details or pin it.",
                 "To see the mosaic as people see it on the wall, click View from 1 m, 3 m or 5 m above the preview. If a red line shows that tiles look soft, make the tiles smaller.",
                 "To keep a mosaic as a file, click Save as…. To use it again, click Open….",
                 "When a new version of the app is available, a blue bar shows above the preview. Click Download to get it. To check now, click Help, then Check for updates.",

@@ -817,6 +817,40 @@ fn reselect_preview(ui: &AppWindow, st: &Shared, only: Option<usize>) {
     });
 }
 
+/// Exclude `source` everywhere in the mosaic and replace its tiles, keeping zoom and centre.
+fn exclude_source_from_preview(ui: &AppWindow, st: &Shared, source: usize) {
+    if ui.get_busy() || ui.get_preview_stale() {
+        return;
+    }
+    let Some(previous) = st.lock().unwrap().project.clone() else { return };
+    let revision = ui.get_settings_revision();
+    let (zoom, cx, cy, distance) = (ui.get_preview_zoom(), ui.get_preview_cx(), ui.get_preview_cy(), ui.get_preview_distance());
+    let shared = st.clone();
+    run_job(ui, st, "Replacing excluded photo", move |job, dd| {
+        let cat = Catalog::open(&dd)?;
+        let pool = load_pool(&shared, &cat, &previous.library_ids(), &previous.settings, job)?;
+        let p = previous.exclude_photo(&pool, source, job)?;
+        let tile_px = (2400 / p.grid.cols.max(p.grid.rows)).clamp(4, 48);
+        let buf = to_image(&render_preview(&cat, &p, tile_px, job)?);
+        job.check()?;
+        Ok(Box::new(move |ui: &AppWindow, s: &mut State| {
+            if ui.get_settings_revision() != revision || !s.project.as_ref().is_some_and(|cur| Arc::ptr_eq(cur, &previous)) {
+                return;
+            }
+            show_project(ui, s, p, buf, false);
+            ui.set_preview_zoom(zoom);
+            ui.set_preview_distance(distance);
+            ui.set_preview_goto_u(cx);
+            ui.set_preview_goto_v(cy);
+            ui.set_preview_goto_n(ui.get_preview_goto_n() + 1);
+            ui.set_status("Photo excluded and replaced.".into());
+            if let Err(e) = autosave(s) {
+                report_error(ui, e.context("could not autosave"));
+            }
+        }))
+    });
+}
+
 /// Shows the new preview zoomed out and gets its photos ready for zooming in.
 fn reset_zoom(ui: &AppWindow, s: &mut State, p: &Arc<Project>) {
     if let Some(j) = s.zoom_job.take() {
@@ -1925,10 +1959,10 @@ fn main() -> Result<()> {
         let (w, s) = (ui.as_weak(), st.clone());
         ui.on_preview_tile_clicked(move |u, v| {
             let ui = w.unwrap();
-            let (tile, pinned) = {
+            let (source, pinned) = {
                 let guard = s.lock().unwrap();
-                match guard.project.as_ref().and_then(|p| zoom::tile_at(p, u as f64, v as f64).map(|t| (t, p.is_pinned(t)))) {
-                    Some((t, p)) => (Some(t), p),
+                match guard.project.as_ref().and_then(|p| zoom::tile_at(p, u as f64, v as f64).map(|t| (p, t))) {
+                    Some((p, t)) => (Some(p.tiles[t].photo as usize), p.is_pinned(t)),
                     None => (None, false),
                 }
             };
@@ -1936,8 +1970,8 @@ fn main() -> Result<()> {
                 ui.set_status("This tile is pinned. Right-click it to unpin first.".into());
                 return;
             }
-            if let Some(tile) = tile {
-                reselect_preview(&ui, &s, Some(tile));
+            if let Some(src) = source {
+                exclude_source_from_preview(&ui, &s, src);
             }
         });
     }
@@ -1996,41 +2030,10 @@ fn main() -> Result<()> {
         let (w, s) = (ui.as_weak(), st.clone());
         ui.on_tile_exclude_photo(move || {
             let ui = w.unwrap();
-            if ui.get_busy() || ui.get_preview_stale() {
-                return;
+            let source = s.lock().unwrap().picked.as_ref().map(|p| p.source);
+            if let Some(src) = source {
+                exclude_source_from_preview(&ui, &s, src);
             }
-            let (previous, source) = {
-                let guard = s.lock().unwrap();
-                let Some(proj) = guard.project.clone() else { return };
-                let Some(src) = guard.picked.as_ref().map(|p| p.source) else { return };
-                (proj, src)
-            };
-            let revision = ui.get_settings_revision();
-            let (zoom, cx, cy, distance) = (ui.get_preview_zoom(), ui.get_preview_cx(), ui.get_preview_cy(), ui.get_preview_distance());
-            let shared = s.clone();
-            run_job(&ui, &s, "Replacing excluded photo", move |job, dd| {
-                let cat = Catalog::open(&dd)?;
-                let pool = load_pool(&shared, &cat, &previous.library_ids(), &previous.settings, job)?;
-                let p = previous.exclude_photo(&pool, source, job)?;
-                let tile_px = (2400 / p.grid.cols.max(p.grid.rows)).clamp(4, 48);
-                let buf = to_image(&render_preview(&cat, &p, tile_px, job)?);
-                job.check()?;
-                Ok(Box::new(move |ui: &AppWindow, s: &mut State| {
-                    if ui.get_settings_revision() != revision || !s.project.as_ref().is_some_and(|cur| Arc::ptr_eq(cur, &previous)) {
-                        return;
-                    }
-                    show_project(ui, s, p, buf, false);
-                    ui.set_preview_zoom(zoom);
-                    ui.set_preview_distance(distance);
-                    ui.set_preview_goto_u(cx);
-                    ui.set_preview_goto_v(cy);
-                    ui.set_preview_goto_n(ui.get_preview_goto_n() + 1);
-                    ui.set_status("Photo excluded and replaced.".into());
-                    if let Err(e) = autosave(s) {
-                        report_error(ui, e.context("could not autosave"));
-                    }
-                }))
-            });
         });
     }
     {
